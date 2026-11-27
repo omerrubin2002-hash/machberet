@@ -89,6 +89,8 @@ svg.flip { transform: scaleX(-1); }
   min-width: 200px;
 }
 #menu[hidden] { display: none; }
+#menu { max-height: calc(100vh - 80px); overflow-y: auto; }
+#bar button[hidden], #menu > button[hidden] { display: none; }
 #menu > button {
   width: 100%; height: 44px; display: block; text-align: right;
   padding: 0 14px; font: inherit; font-size: 15px;
