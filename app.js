@@ -2549,7 +2549,7 @@
       dlgBtns.appendChild(ok);
     }
     if (!o.noCancel) {
-      const c = mk(o.list ? 'סגירה' : 'ביטול');
+      const c = mk(o.cancel || (o.list ? 'סגירה' : 'ביטול'));
       c.addEventListener('click', () => closeDialog(null));
       dlgBtns.appendChild(c);
     }
@@ -3788,6 +3788,7 @@
       await persist(() => DB.putFile({ id: fileId, name: String(file.name || ''), blob: new Blob([bytes], { type: 'application/pdf' }) }));
       pdfDocs.set(fileId, Promise.resolve(doc));
       flushLive(); clearSelection();
+      try { await inkConvert(pages.map((pg) => ({ pg, doc })), true); } catch (e) { console.error(e); } // כתב יד → כתב עריך (אם המשתמש רוצה)
       if (target === 'append' && curNb) {
         curNb.pages.push(...pages);
         await persist(() => DB.putRec('notebooks', curNb));
@@ -3805,6 +3806,160 @@
       ok = true;
     } catch (err) { console.error(err); } finally { importBusy = false; }
     if (!ok && await dialog({ title: msg || 'הייבוא לא הצליח.\nשום דבר לא השתנה.', ok: 'נסה שוב' })) pickPdf(target);
+  }
+
+  // ===================== כתב יד מ-PDF (TALI's Notes ודומים) → כתב שאפשר לערוך =====================
+  // בקבצים כאלה כל קו של כתב הוא צורה סגורה ממולאת: צד אחד של הקו הלוך והצד השני חזור.
+  // מוצאים את נקודת הקצה (המקום שבו שני הצדדים נפגשים הכי טוב), מחלקים כל צד לאותו מספר נקודות,
+  // והאמצע בין הצדדים = קו האמצע, המרחק ביניהם = העובי. עמוד שיש בו משהו אחר (טקסט, תמונה) לא מומר.
+  const INK_OK_OPS = ['save', 'restore', 'transform', 'constructPath', 'clip', 'eoClip', 'endPath', 'fill', 'eoFill',
+    'stroke', 'closeStroke', 'setFillRGBColor', 'setStrokeRGBColor', 'setFillGray', 'setStrokeGray', 'setGState',
+    'setLineWidth', 'setLineCap', 'setLineJoin', 'setMiterLimit', 'setDash', 'dependency', 'setFillColorSpace', 'setStrokeColorSpace'];
+  function inkResample(Q, M) {
+    const L = [0];
+    for (let i = 1; i < Q.length; i++) L.push(L[i - 1] + Math.hypot(Q[i][0] - Q[i - 1][0], Q[i][1] - Q[i - 1][1]));
+    const T = L[L.length - 1], out = [];
+    let j = 0;
+    for (let i = 0; i < M; i++) {
+      const s = M === 1 ? 0 : T * i / (M - 1);
+      while (j < Q.length - 2 && L[j + 1] < s) j++;
+      if (Q.length < 2) { out.push(Q[0]); continue; }
+      const t = Math.min(1, Math.max(0, (s - L[j]) / (L[j + 1] - L[j] || 1)));
+      out.push([Q[j][0] + (Q[j + 1][0] - Q[j][0]) * t, Q[j][1] + (Q[j + 1][1] - Q[j][1]) * t]);
+    }
+    return { out, T };
+  }
+  function inkCenterline(P) { // P: מתאר סגור → [[x, y, r], ...]
+    const N = P.length;
+    if (N < 4) {
+      let cx = 0, cy = 0, r = 0;
+      for (const p of P) { cx += p[0]; cy += p[1]; }
+      cx /= N; cy /= N;
+      for (const p of P) r = Math.max(r, Math.hypot(p[0] - cx, p[1] - cy));
+      return [[cx, cy, r], [cx + 0.01, cy, r]];
+    }
+    const L = [0];
+    for (let i = 1; i <= N; i++) { const a = P[i - 1], b = P[i % N]; L.push(L[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1])); }
+    const T = L[N], sides = (k) => { const B = [P[0]]; for (let i = N - 1; i >= k; i--) B.push(P[i]); return [P.slice(0, k + 1), B]; };
+    let best = N >> 1, bc = Infinity;
+    for (let k = 1; k < N - 1; k++) {
+      if (L[k] < 0.25 * T || L[k] > 0.75 * T) continue;
+      const [A, B] = sides(k), ra = inkResample(A, 16).out, rb = inkResample(B, 16).out;
+      let c = 0;
+      for (let i = 0; i < 16; i++) c += Math.hypot(ra[i][0] - rb[i][0], ra[i][1] - rb[i][1]);
+      if (c < bc) { bc = c; best = k; }
+    }
+    const [A, B] = sides(best);
+    const M = Math.max(2, Math.min(400, Math.ceil(inkResample(A, 2).T / 1.5) + 1));
+    const ra = inkResample(A, M).out, rb = inkResample(B, M).out;
+    return ra.map((a, i) => [(a[0] + rb[i][0]) / 2, (a[1] + rb[i][1]) / 2, Math.hypot(a[0] - rb[i][0], a[1] - rb[i][1]) / 2]);
+  }
+  function inkHex(c) {
+    if (typeof c === 'string') return c.startsWith('#') ? c.slice(0, 7) : '#000000';
+    return '#' + [0, 1, 2].map((i) => Math.round(+c[i] || 0).toString(16).padStart(2, '0')).join('');
+  }
+  // סורק עמוד: null אם אי אפשר להמיר אותו, אחרת { list: [{P, color, hl}], paper, h }
+  async function inkScan(doc, n) {
+    const pdfjs = await loadPdfjs(), OPS = pdfjs.OPS, names = {};
+    for (const k in OPS) names[OPS[k]] = k;
+    const page = await doc.getPage(n);
+    const vp = page.getViewport({ scale: 1 }), k0 = PAGE_W / vp.width;
+    const ol = await page.getOperatorList();
+    page.cleanup();
+    for (const f of ol.fnArray) if (!INK_OK_OPS.includes(names[f])) return null;
+    const mul = (a, b) => [a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1], a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3], a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5]];
+    let ctm = page.getViewport({ scale: k0 }).transform.slice(), path = null, color = '#000000', alpha = 1;
+    const stack = [], list = [];
+    let hz = 0, vt = 0;
+    for (let i = 0; i < ol.fnArray.length; i++) {
+      const f = ol.fnArray[i], a = ol.argsArray[i];
+      if (f === OPS.save) stack.push([ctm, color, alpha]);
+      else if (f === OPS.restore) { const s = stack.pop(); if (s) [ctm, color, alpha] = s; }
+      else if (f === OPS.transform) ctm = mul(ctm, a);
+      else if (f === OPS.setFillRGBColor) color = inkHex(a);
+      else if (f === OPS.setGState) { for (const [key, v] of a[0]) if (key === 'ca') alpha = +v; }
+      else if (f === OPS.constructPath) path = a;
+      else if (f === OPS.endPath) path = null;
+      else if ((f === OPS.fill || f === OPS.eoFill || f === OPS.stroke) && path) {
+        const ops = path[0], c = path[1], subs = [];
+        let cur = null, j = 0;
+        const pt = (x, y) => [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]];
+        for (const op of ops) {
+          if (op === 19) { j += 4; cur = null; continue; } // מלבן = רקע, מדלגים
+          if (op === 13) { cur = [pt(c[j], c[j + 1])]; subs.push(cur); j += 2; }
+          else if (op === 14) { if (cur) cur.push(pt(c[j], c[j + 1])); j += 2; }
+          else if (op === 15) { if (cur) cur.push(pt(c[j + 4], c[j + 5])); j += 6; }
+          else if (op === 16 || op === 17) { if (cur) cur.push(pt(c[j + 2], c[j + 3])); j += 4; }
+        }
+        if (f === OPS.stroke) { // קווי הדף: אופקי / אנכי
+          for (const s of subs) if (s.length === 2) {
+            const dx = Math.abs(s[1][0] - s[0][0]), dy = Math.abs(s[1][1] - s[0][1]);
+            if (dy < 0.5 && dx > PAGE_W * 0.5) hz++; else if (dx < 0.5 && dy > PAGE_W * 0.5) vt++;
+          }
+        } else for (const s of subs) if (s.length >= 2) list.push({ P: s, color, hl: alpha < 0.9 });
+        path = null;
+      }
+    }
+    if (!list.length) return null;
+    return { list, paper: hz > 3 && vt > 3 ? 'grid' : hz > 3 ? 'lines' : 'blank', h: vp.height * k0 };
+  }
+  function inkRecs(scan, pageId) {
+    const recs = [];
+    for (const it of scan.list) {
+      const C = inkCenterline(it.P), n = C.length, pts = new Float32Array(n * 3);
+      let rmax = 0, rsum = 0;
+      for (const c of C) { rmax = Math.max(rmax, c[2]); rsum += c[2]; }
+      if (it.hl) {
+        const size = Math.max(1, 2 * rsum / n);
+        C.forEach((c, i) => { pts[i * 3] = c[0]; pts[i * 3 + 1] = c[1]; pts[i * 3 + 2] = 0.5; });
+        recs.push({ id: newId(), page: pageId, type: 'hl', color: it.color, size, pts });
+        continue;
+      }
+      const size = Math.max(0.3, rmax * 2 / 1.3); // עט נובע: רדיוס = גודל × (0.35 + 0.95 × לחץ) / 2
+      C.forEach((c, i) => {
+        pts[i * 3] = c[0]; pts[i * 3 + 1] = c[1];
+        pts[i * 3 + 2] = Math.min(1, Math.max(0, (2 * c[2] / size - 0.35) / 0.95));
+      });
+      recs.push({ id: newId(), page: pageId, type: 'fountain', color: it.color, size, pts });
+    }
+    return recs;
+  }
+  // items: [{ pg, doc }]. שואל לפני ההמרה. מחזיר כמה עמודים הומרו (העמודים משתנים במקום; שמירת המחברת על הקורא)
+  async function inkConvert(items, quiet) {
+    const found = [];
+    for (const it of items) {
+      try { const s = await inkScan(it.doc, it.pg.bg.n); if (s) found.push({ pg: it.pg, s }); } catch (e) { console.error(e); }
+    }
+    if (!found.length) { if (!quiet) toast('לא נמצא כתב יד שאפשר להמיר'); return 0; }
+    const cnt = found.length === 1 ? 'בעמוד אחד' : 'ב-' + found.length + ' עמודים';
+    if (!await dialog({ title: 'נמצא כתב יד ' + cnt + '.\nלהפוך אותו לכתב רגיל של המחברת, שאפשר לבחור בלאסו, להזיז, להעתיק ולמחוק?', ok: 'להפוך לכתב', cancel: 'להשאיר כמו שהוא' })) return 0;
+    toast('ממיר כתב…');
+    let done = 0;
+    for (const { pg, s } of found) {
+      const recs = inkRecs(s, pg.id);
+      await persist(() => DB.put(recs));
+      delete pg.bg;
+      pg.type = s.paper;
+      const h = Math.ceil(s.h / GRID) * GRID;
+      if (h > PAGE_H0) pg.h = h; else delete pg.h;
+      setThumbUrl(pg.id, null); histories.delete(pg.id);
+      done++;
+      await new Promise((r) => setTimeout(r));
+    }
+    return done;
+  }
+  async function inkConvertNb() {
+    if (!curNb || viewOnly) return;
+    flushLive(); clearSelection();
+    const items = [];
+    for (const pg of curNb.pages) if (pg.bg) { try { items.push({ pg, doc: await getPdf(pg.bg.file) }); } catch (e) { console.error(e); } }
+    if (!items.length) { toast('אין במחברת עמודי PDF'); return; }
+    let n = 0;
+    try { n = await inkConvert(items); } catch (e) { console.error(e); }
+    if (!n) return;
+    await persist(() => DB.putRec('notebooks', curNb));
+    await openPage(curNb.id, curPage);
+    toast(n === 1 ? 'עמוד אחד הומר לכתב' : n + ' עמודים הומרו לכתב');
   }
 
   // ===================== הוספת תמונה (לוח, גלריה, מצלמה) =====================
@@ -4116,6 +4271,7 @@
     else if (cmd === 'imgCam') camFile.click();
     else if (cmd === 'imgPaste') pasteImage();
     else if (cmd === 'pdfAdd') pickPdf('append');
+    else if (cmd === 'pdfInk') inkConvertNb();
     else if (cmd === 'pdfExport') exportPdfMenu();
     else if (cmd === 'fast') {
       settings.fastInk = !settings.fastInk;
