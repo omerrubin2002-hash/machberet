@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#f7f6f3">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>המחברת שלי</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="bar">
+  <div class="group">
+    <button id="libBtn" title="ספרייה" aria-label="ספרייה">
+      <svg viewBox="0 0 24 24"><path d="M4 5h4v14H4z M10 5h4v14h-4z M15.5 6.2l3.8-1 3 13.6-3.8 1z"/></svg>
+    </button>
+  </div>
+  <div class="sep"></div>
+  <div class="group">
+    <button class="tool" data-tool="pen" title="עט" aria-label="עט">
+      <svg viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L16 5l3 3L8.2 18.8z M14 7l3 3"/></svg>
+    </button>
+    <button class="tool" data-tool="hl" title="מדגש" aria-label="מדגש">
+      <svg viewBox="0 0 24 24"><path d="M4 21h8 M6 17l2.5 2.5h3L20 11l-6-6-8.5 8.5z M11 8l6 6"/><path d="M5.5 13.5l5 5" stroke-width="3.2" stroke-opacity=".35"/></svg>
+    </button>
+    <button class="tool" data-tool="eraser" title="מחק" aria-label="מחק">
+      <svg viewBox="0 0 24 24"><path d="M9 20h11 M4.6 15.4l9-9a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L12 18H7.2z M9 11l4.5 4.5"/></svg>
+    </button>
+    <button class="tool" data-tool="lasso" title="לאסו" aria-label="לאסו">
+      <svg viewBox="0 0 24 24"><path d="M12 4c4.4 0 8 2.2 8 5s-3.6 5-8 5-8-2.2-8-5 3.6-5 8-5z" stroke-dasharray="3 2.4"/><path d="M7.5 13.2c-1.6 1-1.4 3 .6 3.2 M8 16.4c0 1.6-1.2 3-3 3.6"/></svg>
+    </button>
+  </div>
+  <div class="group" id="selGroup" hidden>
+    <button id="selCopy" title="העתקת הבחירה" aria-label="העתקת הבחירה">
+      <svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg>
+    </button>
+  </div>
+  <div class="sep"></div>
+  <div class="group" id="sizes"></div>
+  <div class="sep"></div>
+  <div class="group" id="colors"></div>
+  <div class="spacer"></div>
+  <span id="status"></span>
+  <div class="group">
+    <button id="pagesBtn" title="עמודים" aria-label="עמודים"><span id="pageNum">1/1</span></button>
+    <button id="undo" title="ביטול" aria-label="ביטול" disabled>
+      <svg viewBox="0 0 24 24"><path d="M15 5l4 4-4 4 M19 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
+    </button>
+    <button id="redo" title="שחזור" aria-label="שחזור" disabled>
+      <svg viewBox="0 0 24 24" class="flip"><path d="M15 5l4 4-4 4 M19 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
+    </button>
+    <button id="more" title="עוד" aria-label="עוד">
+      <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+    </button>
+  </div>
+</header>
+<div id="menu" hidden>
+  <div class="menu-label">סוג דף</div>
+  <div class="paper-grid" id="paperGrid"></div>
+  <div class="menu-sep"></div>
+  <button data-cmd="cont" id="contBtn">גלילה רציפה בין עמודים</button>
+  <button data-cmd="fav" id="favBtn">עמוד מועדף ★</button>
+  <button data-cmd="grow" id="growBtn">דף שגדל (מתארך כשכותבים למטה)</button>
+  <button data-cmd="shrink">הקטנת הדף (הסרת החלק הריק בסוף)</button>
+  <button data-cmd="dark" id="darkBtn">מצב כהה</button>
+  <button data-cmd="full" id="fullBtn">מסך מלא</button>
+  <button data-cmd="view" id="viewBtn">צפייה בלבד</button>
+  <button data-cmd="hidebar">הסתרת הסרגל</button>
+  <div class="menu-sep"></div>
+  <button data-cmd="fit">התאמה לרוחב המסך</button>
+  <button data-cmd="clear">ניקוי הדף</button>
+  <button data-cmd="backup">גיבוי המחברת לקובץ</button>
+  <button data-cmd="fast" id="fastBtn">כתיבה מהירה (ניסיוני)</button>
+</div>
+<div id="palette" hidden></div>
+<div id="penMenu" class="pop" hidden>
+  <div class="seg">
+    <button data-ptype="felt">כדורי</button>
+    <button data-ptype="fountain">נובע</button>
+    <button data-ptype="brush">מכחול</button>
+    <button data-ptype="pencil">עיפרון</button>
+  </div>
+  <div class="try">
+    <canvas id="tryC"></canvas>
+    <span class="try-hint" id="tryHint">נסה כאן</span>
+    <button id="tryClear">ניקוי</button>
+  </div>
+</div>
+<div id="hlMenu" class="pop" hidden>
+  <div class="seg">
+    <button data-hmode="free">חופשי</button>
+    <button data-hmode="smart">חכם (פס ישר)</button>
+  </div>
+</div>
+<div id="lassoMenu" class="pop" hidden>
+  <div class="seg">
+    <button data-lmode="cut">חיתוך בגבול</button>
+    <button data-lmode="whole">קו שלם</button>
+  </div>
+</div>
+<div id="colorEdit" class="pop" hidden>
+  <button data-cedit="del" class="wide">מחיקת הצבע</button>
+</div>
+<div id="ctxMenu" hidden></div>
+<div id="eraserMenu" class="pop" hidden>
+  <div class="seg">
+    <button data-emode="stroke">קו שלם</button>
+    <button data-emode="area">שטח</button>
+  </div>
+  <div class="esizes" id="esizes"></div>
+  <label class="toggle"><span>מחק דינמי</span><input type="checkbox" id="edyn"></label>
+</div>
+<main id="stage">
+  <canvas id="main"></canvas>
+  <canvas id="over"></canvas>
+  <button id="showBar" hidden title="הצגת הסרגל" aria-label="הצגת הסרגל">
+    <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+  </button>
+</main>
+<aside id="pagesPanel" hidden>
+  <div class="pp-head"><span id="ppTitle"></span><button id="ppClose" aria-label="סגירה">✕</button></div>
+  <div id="ppList"></div>
+  <button id="ppAdd" class="pp-add">+ עמוד חדש</button>
+</aside>
+<section id="library" hidden>
+  <nav class="lib-side">
+    <div class="lib-brand"><span class="logo"><svg viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L16 5l3 3L8.2 18.8z M14 7l3 3"/></svg></span>מחברת</div>
+    <button class="nav" data-view="all"><svg viewBox="0 0 24 24"><path d="M5 4h11a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2z M5 18a2 2 0 0 1 2-2h11"/></svg>כל המחברות<span class="cnt" id="cntAll"></span></button>
+    <button class="nav" data-view="fav"><svg viewBox="0 0 24 24"><path d="M12 4l2.4 5 5.4.7-4 3.8 1 5.4-4.8-2.6-4.8 2.6 1-5.4-4-3.8 5.4-.7z"/></svg>עמודים מועדפים<span class="cnt" id="cntFav"></span></button>
+    <button class="nav side-title-btn" data-view="root"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>ספרייה<span class="cnt" id="cntRoot"></span></button>
+    <div id="sideTree"></div>
+    <div class="side-bottom">
+      <div class="backup-note" id="backupNote"></div>
+      <button class="nav" data-view="trash"><svg viewBox="0 0 24 24"><path d="M4 7h16 M9 7V5h6v2 M6 7l1 13h10l1-13"/></svg>סל מחזור<span class="cnt" id="cntTrash"></span></button>
+      <button class="nav" data-view="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3 M12 18.5v3 M2.5 12h3 M18.5 12h3 M5.3 5.3l2.1 2.1 M16.6 16.6l2.1 2.1 M5.3 18.7l2.1-2.1 M16.6 7.4l2.1-2.1"/></svg>הגדרות</button>
+    </div>
+  </nav>
+  <div class="lib-main">
+    <div class="lib-top">
+      <div class="lib-toprow">
+        <div style="min-width:0">
+          <div id="libCrumbs"></div>
+          <h1 id="libTitle">ספרייה</h1>
+          <div id="libSub"></div>
+        </div>
+        <button id="libClose" title="חזרה למחברת" aria-label="חזרה למחברת">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12 M18 6L6 18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="lib-tools" id="libTools">
+      <label class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg><input id="libSearch" type="search" placeholder="חיפוש מחברות ותיקיות" autocomplete="off"></label>
+      <button class="tbtn" id="libSort"><svg viewBox="0 0 24 24"><path d="M7 5v14 M4 16l3 3 3-3 M17 19V5 M14 8l3-3 3 3"/></svg><span id="sortLabel">מיון</span></button>
+      <button id="libAdd" title="חדש" aria-label="חדש"><svg viewBox="0 0 24 24"><path d="M12 5v14 M5 12h14"/></svg></button>
+    </div>
+    <div id="libBody"></div>
+  </div>
+</section>
+<div id="dlg" hidden>
+  <div class="dlg-box">
+    <div class="dlg-title"></div>
+    <input class="dlg-input" type="text" autocomplete="off">
+    <div class="seg dlg-seg"></div>
+    <div class="dlg-sub" data-for="covers">כריכה</div>
+    <div class="dlg-covers"></div>
+    <div class="dlg-sub" data-for="paper">סוג דף</div>
+    <div class="paper-grid dlg-paper"></div>
+    <div class="dlg-list"></div>
+    <div class="dlg-btns"></div>
+  </div>
+</div>
+<div id="popMenu" hidden></div>
+<div id="toast" hidden></div>
+<input type="file" id="restoreFile" accept=".json,application/json" hidden>
+<script src="app.js"></script>
+</body>
+</html>
