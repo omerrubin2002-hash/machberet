@@ -316,16 +316,34 @@
   }
 
   // ===================== תמונות =====================
-  // תמונה בעמוד: מלבן (x,y,w,h) כפי שמוצג, סיבוב ברבעים סביב המרכז,
+  // תמונה בעמוד: מרכז (cx,cy), גודל לפני סיבוב (iw,ih), זווית בכל מעלה (ang, עם כיוון השעון),
   // וחיתוך [שמאל, עליון, ימין, תחתון] בשברים של התמונה המקורית. הקובץ עצמו (blob) נשמר ברשומה.
   function makeImg(r) {
     const crop = Array.isArray(r.crop) && r.crop.length === 4 ? r.crop.slice() : [0, 0, 1, 1];
-    return {
+    let cx = r.cx, cy = r.cy, iw = r.iw, ih = r.ih, ang = r.ang || 0;
+    if (typeof cx !== 'number') { // רשומה ישנה: מלבן מוצג (x,y,w,h) + סיבוב ברבעים
+      const rot = (((r.rot || 0) % 360) + 360) % 360, odd = rot % 180 !== 0;
+      cx = r.x + r.w / 2; cy = r.y + r.h / 2; iw = odd ? r.h : r.w; ih = odd ? r.w : r.h; ang = rot;
+    }
+    const im = {
       id: r.id, page: r.page, img: true, blob: r.blob, mime: r.mime || (r.blob && r.blob.type) || 'image/png',
-      x: r.x, y: r.y, w: r.w, h: r.h, rot: (((r.rot || 0) % 360) + 360) % 360, crop, bbox: [r.x, r.y, r.x + r.w, r.y + r.h],
+      cx, cy, iw, ih, ang: ((ang % 360) + 360) % 360, crop,
     };
+    im.corners = [];
+    for (const [lx, ly] of [[-iw / 2, -ih / 2], [iw / 2, -ih / 2], [iw / 2, ih / 2], [-iw / 2, ih / 2]]) im.corners.push(...imgWorld(im, lx, ly));
+    im.bbox = polyBox(im.corners);
+    return im;
   }
-  function imgRec(k) { return { id: k.id, page: k.page, blob: k.blob, mime: k.mime, x: k.x, y: k.y, w: k.w, h: k.h, rot: k.rot, crop: k.crop }; }
+  function imgRec(k) { return { id: k.id, page: k.page, blob: k.blob, mime: k.mime, cx: k.cx, cy: k.cy, iw: k.iw, ih: k.ih, ang: k.ang, crop: k.crop }; }
+  // נקודה במערכת של התמונה (ממרכזה, לפני סיבוב) <-> נקודה בדף
+  function imgWorld(im, lx, ly) {
+    const a = im.ang * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+    return [im.cx + lx * c - ly * s, im.cy + lx * s + ly * c];
+  }
+  function imgLocal(im, x, y) {
+    const a = im.ang * Math.PI / 180, c = Math.cos(a), s = Math.sin(a), dx = x - im.cx, dy = y - im.cy;
+    return [dx * c + dy * s, -dx * s + dy * c];
+  }
   const bmpCache = new WeakMap(); // blob -> ImageBitmap / Promise / 'bad'
   function imgBitmap(im) { const v = im.blob && bmpCache.get(im.blob); return v && typeof v === 'object' && !(v instanceof Promise) ? v : null; }
   function decodeImg(im) {
@@ -342,15 +360,14 @@
   function drawImg(ctx, im) {
     const b = imgBitmap(im);
     ctx.globalAlpha = 1;
-    if (!b) { decodeImg(im); ctx.fillStyle = 'rgba(128,128,128,0.15)'; ctx.fillRect(im.x, im.y, im.w, im.h); return; }
-    const c = im.crop, sx = c[0] * b.width, sy = c[1] * b.height, sw = (c[2] - c[0]) * b.width, sh = (c[3] - c[1]) * b.height;
-    const odd = im.rot % 180 !== 0, dw = odd ? im.h : im.w, dh = odd ? im.w : im.h;
     ctx.save();
-    ctx.translate(im.x + im.w / 2, im.y + im.h / 2);
-    ctx.rotate(im.rot * Math.PI / 180);
+    ctx.translate(im.cx, im.cy);
+    ctx.rotate(im.ang * Math.PI / 180);
+    if (!b) { decodeImg(im); ctx.fillStyle = 'rgba(128,128,128,0.15)'; ctx.fillRect(-im.iw / 2, -im.ih / 2, im.iw, im.ih); ctx.restore(); return; }
+    const c = im.crop, sx = c[0] * b.width, sy = c[1] * b.height, sw = (c[2] - c[0]) * b.width, sh = (c[3] - c[1]) * b.height;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'medium';
-    ctx.drawImage(b, sx, sy, sw, sh, -dw / 2, -dh / 2, dw, dh);
+    ctx.drawImage(b, sx, sy, sw, sh, -im.iw / 2, -im.ih / 2, im.iw, im.ih);
     ctx.restore();
   }
   function drawItem(ctx, it) { if (it.img) drawImg(ctx, it); else drawInk(ctx, it); }
@@ -1388,24 +1405,23 @@
     }
     // תמונה נבחרת שלמה (לא נחתכת) אם המרכז שלה בתוך הלאסו; במצב "קו שלם" גם אם פינה בפנים
     for (const im of images) {
-      const b = im.bbox;
-      if (inPoly(poly, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) || (settings.lassoMode === 'whole' &&
-        (inPoly(poly, b[0], b[1]) || inPoly(poly, b[2], b[1]) || inPoly(poly, b[2], b[3]) || inPoly(poly, b[0], b[3])))) {
+      const k = im.corners;
+      if (inPoly(poly, im.cx, im.cy) || (settings.lassoMode === 'whole' &&
+        (inPoly(poly, k[0], k[1]) || inPoly(poly, k[2], k[3]) || inPoly(poly, k[4], k[5]) || inPoly(poly, k[6], k[7])))) {
         items.push(im); whole.push(im);
       }
     }
     return { poly, items, whole, remove, keep };
   }
-  const rectPoly = (b) => [b[0], b[1], b[2], b[1], b[2], b[3], b[0], b[3]];
-  // בחירה של פריטים שלמים; תמונה בודדת מקבלת מסגרת מלבנית וכפתורי חיתוך/סיבוב
+  // בחירה של פריטים שלמים; תמונה בודדת מקבלת מסגרת לפי הצורה שלה (גם מסובבת) וכפתורי חיתוך/סיבוב
   function makeSel(items, poly, crop) {
     const one = items.length === 1 && items[0].img ? items[0] : null;
-    return { poly: one ? rectPoly(one.bbox) : poly, items, whole: items, remove: [], keep: [], img: one, crop: !!(one && crop) };
+    return { poly: one ? one.corners.slice() : poly, items, whole: items, remove: [], keep: [], img: one, crop: !!(one && crop) };
   }
   function imageAt(x, y) {
     for (let i = images.length - 1; i >= 0; i--) {
-      const b = images[i].bbox;
-      if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) return images[i];
+      const [lx, ly] = imgLocal(images[i], x, y);
+      if (Math.abs(lx) <= images[i].iw / 2 && Math.abs(ly) <= images[i].ih / 2) return images[i];
     }
     return null;
   }
@@ -1468,8 +1484,16 @@
   }
 
   // ידיות שינוי גודל בפינות (רק עיגולים קטנים, בלי מלבן סביב הבחירה)
-  function selHandles(poly, s) {
+  function selHandles(poly, s, img) {
     const b = polyBox(poly), pad = 12 / s;
+    if (img && poly.length === 8) { // תמונה: הידיות בפינות שלה (גם כשהיא מסובבת), קצת החוצה
+      const cx = (poly[0] + poly[2] + poly[4] + poly[6]) / 4, cy = (poly[1] + poly[3] + poly[5] + poly[7]) / 4, out = [];
+      for (let i = 0; i < 8; i += 2) {
+        const dx = poly[i] - cx, dy = poly[i + 1] - cy, d = Math.hypot(dx, dy) || 1;
+        out.push([poly[i] + dx / d * pad, poly[i + 1] + dy / d * pad]);
+      }
+      return out;
+    }
     return [[b[0] - pad, b[1] - pad], [b[2] + pad, b[1] - pad], [b[2] + pad, b[3] + pad], [b[0] - pad, b[3] + pad]];
   }
   function drawSelOverlay() {
@@ -1477,7 +1501,7 @@
     clearOverlay();
     if (!sel) return;
     const T = selDrag ? selDrag.T : { k: 1, tx: 0, ty: 0 }, s = rendered.s;
-    const cropping = selDrag && selDrag.mode === 'crop' && selDrag.preview;
+    const cropping = selDrag && (selDrag.mode === 'crop' || selDrag.mode === 'rot') && selDrag.preview;
     setWorld(octx, rendered);
     if (selDrag && selDrag.lifted) {
       octx.save();
@@ -1489,7 +1513,8 @@
       octx.restore();
       octx.globalAlpha = 1;
     }
-    const poly = cropping ? rectPoly(selDrag.preview.bbox) : tPoly(sel.poly, T);
+    const poly = cropping ? selDrag.preview.corners : tPoly(sel.poly, T);
+    const shown = cropping ? selDrag.preview : sel.img; // התמונה כפי שהיא עכשיו (לידיות החיתוך והסיבוב)
     octx.beginPath();
     octx.moveTo(poly[0], poly[1]);
     for (let i = 2; i < poly.length; i += 2) octx.lineTo(poly[i], poly[i + 1]);
@@ -1501,7 +1526,7 @@
     octx.strokeStyle = SEL_BLUE;
     octx.stroke();
     octx.setLineDash([]);
-    for (const [hx, hy] of selHandles(poly, s)) {
+    for (const [hx, hy] of selHandles(poly, s, !!sel.img)) {
       octx.beginPath();
       octx.arc(hx, hy, 8 / s, 0, Math.PI * 2);
       octx.fillStyle = '#fff';
@@ -1509,49 +1534,80 @@
       octx.lineWidth = 2 / s;
       octx.stroke();
     }
-    if (sel.crop) { // מצב חיתוך: פסים באמצע כל צלע, גוררים אותם פנימה
+    if (shown && !(selDrag && selDrag.lifted && !cropping)) {
+      // ידית סיבוב: עיגול מעל התמונה, גוררים אותו לכל זווית
+      const [tx, ty] = imgWorld(shown, 0, -shown.ih / 2), [rx, ry] = rotHandle(shown, s);
+      octx.beginPath(); octx.moveTo(tx, ty); octx.lineTo(rx, ry);
+      octx.lineWidth = 1.5 / s; octx.strokeStyle = SEL_BLUE; octx.stroke();
+      octx.beginPath(); octx.arc(rx, ry, 11 / s, 0, Math.PI * 2);
+      octx.fillStyle = SEL_BLUE; octx.fill();
+      octx.beginPath(); octx.arc(rx, ry, 5 / s, -0.3, Math.PI * 1.4);
+      octx.strokeStyle = '#fff'; octx.lineWidth = 1.8 / s; octx.stroke();
+      if (selDrag && selDrag.mode === 'rot' && cropping) { // הזווית בזמן הסיבוב
+        const deg = Math.round(shown.ang > 180 ? shown.ang - 360 : shown.ang) + '°';
+        octx.font = (15 / s) + 'px system-ui, sans-serif';
+        octx.textAlign = 'center'; octx.textBaseline = 'middle';
+        const w = octx.measureText(deg).width + 16 / s;
+        octx.fillStyle = 'rgba(30,30,30,0.8)';
+        octx.fillRect(rx - w / 2, ry - 44 / s, w, 24 / s);
+        octx.fillStyle = '#fff';
+        octx.fillText(deg, rx, ry - 32 / s);
+      }
+    }
+    if (sel.crop && shown) { // מצב חיתוך: פסים באמצע כל צלע, גוררים אותם פנימה
       octx.lineCap = 'round';
       octx.lineWidth = 6 / s;
       octx.strokeStyle = SEL_BLUE;
-      const b = polyBox(poly);
-      for (const [mx, my, e] of cropMids(b)) {
-        const L = Math.min(14 / s, (e % 2 ? b[2] - b[0] : b[3] - b[1]) / 4);
-        octx.beginPath();
-        if (e % 2) { octx.moveTo(mx - L, my); octx.lineTo(mx + L, my); } else { octx.moveTo(mx, my - L); octx.lineTo(mx, my + L); }
+      const a = shown.ang * Math.PI / 180, c = Math.cos(a), sn = Math.sin(a);
+      for (const [mx, my, e] of cropMids(shown)) {
+        const L = Math.min(14 / s, (e % 2 ? shown.iw : shown.ih) / 4);
+        const dx = e % 2 ? c : -sn, dy = e % 2 ? sn : c; // כיוון הצלע
+        octx.beginPath(); octx.moveTo(mx - dx * L, my - dy * L); octx.lineTo(mx + dx * L, my + dy * L);
         octx.stroke();
       }
       octx.lineCap = 'butt';
     }
     overlayDirty = true;
   }
-  // אמצע הצלעות לפי הסדר: שמאל, עליון, ימין, תחתון
-  function cropMids(b) {
-    const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
-    return [[b[0], cy, 0], [cx, b[1], 1], [b[2], cy, 2], [cx, b[3], 3]];
+  function rotHandle(im, s) { return imgWorld(im, 0, -im.ih / 2 - 36 / s); }
+  // אמצע הצלעות (בדף) לפי הסדר: שמאל, עליון, ימין, תחתון של התמונה (לפני סיבוב)
+  function cropMids(im) {
+    return [[-im.iw / 2, 0, 0], [0, -im.ih / 2, 1], [im.iw / 2, 0, 2], [0, im.ih / 2, 3]].map(([lx, ly, e]) => [...imgWorld(im, lx, ly), e]);
   }
-  // חיתוך: הצלע i של המלבן המוצג זזה פנימה ב-d (בציר שלה); החיתוך בתמונה המקורית מחושב לפי הסיבוב
-  function cropImg(im, i, d) {
+  // חיתוך: הצלע i זזה פנימה לפי התנועה (dx,dy) בכיוון הצלע של התמונה, גם כשהיא מסובבת
+  function cropImg(im, i, dx, dy) {
+    const a = im.ang * Math.PI / 180, cs = Math.cos(a), sn = Math.sin(a);
+    const d = i % 2 === 0 ? dx * cs + dy * sn : -dx * sn + dy * cs;
     const a0 = i < 2 ? d : -d;
-    const k = Math.round(im.rot / 90) % 4, j = (i - k + 4) % 4;
     const c = im.crop.slice();
-    const span = j % 2 === 0 ? c[2] - c[0] : c[3] - c[1];
-    const disp = i % 2 === 0 ? im.w : im.h;
+    const span = i % 2 === 0 ? c[2] - c[0] : c[3] - c[1];
+    const disp = i % 2 === 0 ? im.iw : im.ih;
     const minSpan = Math.min(span, Math.max(0.02, span * 20 / disp));
-    const room = j === 0 ? c[0] : j === 1 ? c[1] : j === 2 ? 1 - c[2] : 1 - c[3]; // כמה אפשר להחזיר החוצה
+    const room = i === 0 ? c[0] : i === 1 ? c[1] : i === 2 ? 1 - c[2] : 1 - c[3]; // כמה אפשר להחזיר החוצה
     const sd = Math.max(-room, Math.min(a0 / disp * span, span - minSpan));
-    if (j === 0) c[0] += sd; else if (j === 1) c[1] += sd; else if (j === 2) c[2] -= sd; else c[3] -= sd;
-    const a = sd / span * disp;
-    let x = im.x, y = im.y, w = im.w, h = im.h;
-    if (i === 0) { x += a; w -= a; } else if (i === 1) { y += a; h -= a; } else if (i === 2) w -= a; else h -= a;
-    return makeImg(Object.assign(imgRec(im), { x, y, w, h, crop: c }));
+    if (i === 0) c[0] += sd; else if (i === 1) c[1] += sd; else if (i === 2) c[2] -= sd; else c[3] -= sd;
+    const m = sd / span * disp; // כמה הצלע זזה ביחידות דף
+    let iw = im.iw, ih = im.ih, lx = 0, ly = 0;
+    if (i % 2 === 0) { iw -= m; lx = i === 0 ? m / 2 : -m / 2; } else { ih -= m; ly = i === 1 ? m / 2 : -m / 2; }
+    const [cx, cy] = imgWorld(im, lx, ly);
+    return makeImg(Object.assign(imgRec(im), { cx, cy, iw, ih, crop: c }));
+  }
+  function rotateImg(im, x0, y0, x, y) {
+    let ang = im.ang + (Math.atan2(y - im.cy, x - im.cx) - Math.atan2(y0 - im.cy, x0 - im.cx)) * 180 / Math.PI;
+    ang = ((Math.round(ang) % 360) + 360) % 360;
+    const near = Math.round(ang / 90) * 90;
+    if (Math.abs(ang - near) <= 4) ang = near % 360; // קרוב לישר: נצמד לישר
+    return makeImg(Object.assign(imgRec(im), { ang }));
   }
 
   function selHit(x, y, touch) {
     const near = touch ? 32 : 24;
-    if (sel.crop && sel.img) {
-      for (const [mx, my, e] of cropMids(sel.img.bbox)) if (Math.hypot(x - mx, y - my) * view.s < near) return { mode: 'crop', edge: e };
+    if (sel.img) {
+      const [rx, ry] = rotHandle(sel.img, view.s);
+      if (Math.hypot(x - rx, y - ry) * view.s < near) return { mode: 'rot' };
+      if (sel.crop) for (const [mx, my, e] of cropMids(sel.img)) if (Math.hypot(x - mx, y - my) * view.s < near) return { mode: 'crop', edge: e };
     }
-    const hs = selHandles(sel.poly, view.s);
+    const hs = selHandles(sel.poly, view.s, !!sel.img);
     for (let i = 0; i < 4; i++) {
       if (Math.hypot(x - hs[i][0], y - hs[i][1]) * view.s < near) return { mode: 'scale', h: hs[i], anchor: hs[(i + 2) % 4] };
     }
@@ -1583,7 +1639,8 @@
       render();
     }
     const x = wx(e.clientX), y = wy(e.clientY);
-    if (D.mode === 'crop') D.preview = cropImg(D.orig, D.edge, D.edge % 2 === 0 ? x - D.x0 : y - D.y0);
+    if (D.mode === 'crop') D.preview = cropImg(D.orig, D.edge, x - D.x0, y - D.y0);
+    else if (D.mode === 'rot') D.preview = rotateImg(D.orig, D.x0, D.y0, x, y);
     else if (D.mode === 'move') D.T = { k: 1, tx: x - D.x0, ty: y - D.y0 };
     else {
       const [ax, ay] = D.anchor, vx = D.h[0] - ax, vy = D.h[1] - ay;
@@ -1595,7 +1652,7 @@
     drawSelOverlay();
   }
   function transformStroke(st, T) {
-    if (st.img) return makeImg(Object.assign(imgRec(st), { id: newId(), page: curPage, x: st.x * T.k + T.tx, y: st.y * T.k + T.ty, w: st.w * T.k, h: st.h * T.k }));
+    if (st.img) return makeImg(Object.assign(imgRec(st), { id: newId(), page: curPage, cx: st.cx * T.k + T.tx, cy: st.cy * T.k + T.ty, iw: st.iw * T.k, ih: st.ih * T.k }));
     const src = st.pts, pts = new Float32Array(src.length);
     for (let i = 0; i < src.length; i += 3) {
       pts[i] = src[i] * T.k + T.tx; pts[i + 1] = src[i + 1] * T.k + T.ty; pts[i + 2] = src[i + 2];
@@ -1605,12 +1662,12 @@
   function endSelDrag() {
     const D = selDrag;
     selDrag = null;
-    if (D.mode === 'crop') {
+    if (D.mode === 'crop' || D.mode === 'rot') {
       renderHide = renderExtra = null;
       const p = D.preview, o = D.orig;
-      if (!D.lifted || !p || (p.x === o.x && p.y === o.y && p.w === o.w && p.h === o.h)) { if (D.lifted) render(); else drawSelOverlay(); return; }
+      if (!D.lifted || !p || (p.cx === o.cx && p.cy === o.cy && p.iw === o.iw && p.ih === o.ih && p.ang === o.ang)) { if (D.lifted) render(); else drawSelOverlay(); return; }
       p.id = newId();
-      sel = makeSel([p], null, true);
+      sel = makeSel([p], null, sel.crop);
       commit({ add: [p], remove: [o] });
       render();
       return;
@@ -1648,8 +1705,8 @@
   // סיבוב תמונה ברבע סיבוב (עם כיוון השעון), סביב המרכז
   function rotateSelImg() {
     if (!sel || !sel.img || busy()) return;
-    const im = sel.img, cx = im.x + im.w / 2, cy = im.y + im.h / 2;
-    const n = makeImg(Object.assign(imgRec(im), { id: newId(), rot: im.rot + 90, x: cx - im.h / 2, y: cy - im.w / 2, w: im.h, h: im.w }));
+    const im = sel.img;
+    const n = makeImg(Object.assign(imgRec(im), { id: newId(), ang: (Math.floor(im.ang / 90 + 1e-6) + 1) * 90 })); // לרבע הבא
     sel = makeSel([n], null, sel.crop);
     commit({ add: [n], remove: [im] });
     render();
@@ -3483,7 +3540,7 @@
       for (const nb of nbs) {
         for (const pg of nb.pages) {
           for (const r of await DB.loadImgs(pg.id)) {
-            const o = imgRec(r);
+            const o = imgRec(makeImg(r));
             delete o.blob;
             o.data = await blobB64(r.blob);
             parts.push((icount ? ',' : '') + JSON.stringify(o));
@@ -3548,10 +3605,16 @@
         files.push({ id: f.id, name: str(f.name, ''), blob: b64Blob(f.data, typeof f.mime === 'string' ? f.mime : 'application/pdf') });
       }
       for (const m of data.images || []) {
-        if (!m || !fin(m.id) || typeof m.page !== 'string' || typeof m.data !== 'string' || ![m.x, m.y, m.w, m.h].every(fin) || !(m.w > 0 && m.h > 0)) return null;
+        if (!m || !fin(m.id) || typeof m.page !== 'string' || typeof m.data !== 'string') return null;
+        const isNew = fin(m.cx); // חדש: מרכז + גודל + זווית; ישן: מלבן + סיבוב ברבעים
+        const nums = isNew ? [m.cx, m.cy, m.iw, m.ih] : [m.x, m.y, m.w, m.h];
+        if (!nums.every(fin) || !(nums[2] > 0 && nums[3] > 0)) return null;
         const crop = Array.isArray(m.crop) && m.crop.length === 4 && m.crop.every(fin) ? m.crop : [0, 0, 1, 1];
         const mime = typeof m.mime === 'string' ? m.mime : 'image/png';
-        imgs.push({ id: m.id, page: m.page, blob: b64Blob(m.data, mime), mime, x: m.x, y: m.y, w: m.w, h: m.h, rot: [0, 90, 180, 270].includes(m.rot) ? m.rot : 0, crop });
+        const r = { id: m.id, page: m.page, blob: b64Blob(m.data, mime), mime, crop };
+        if (isNew) Object.assign(r, { cx: m.cx, cy: m.cy, iw: m.iw, ih: m.ih, ang: fin(m.ang) ? m.ang : 0 });
+        else Object.assign(r, { x: m.x, y: m.y, w: m.w, h: m.h, rot: [0, 90, 180, 270].includes(m.rot) ? m.rot : 0 });
+        imgs.push(imgRec(makeImg(r)));
       }
     } catch (e) { return null; } // base64 פגום
     for (const f of data.folders || []) {
@@ -3785,7 +3848,7 @@
     w *= k; h *= k;
     const x = Math.max(0, Math.min(PAGE_W - w, (vx0 + vx1) / 2 - w / 2));
     const y = Math.max(0, Math.min(PAGE_H - h, (vy0 + vy1) / 2 - h / 2));
-    const im = makeImg({ id: newId(), page: curPage, blob: r.blob, mime: r.blob.type, x, y, w, h, rot: 0 });
+    const im = makeImg({ id: newId(), page: curPage, blob: r.blob, mime: r.blob.type, cx: x + w / 2, cy: y + h / 2, iw: w, ih: h, ang: 0 });
     commit({ add: [im], remove: [] });
     sel = makeSel([im]);
     updateUI();
@@ -3893,27 +3956,26 @@
     page.pushOperators(P.popGraphicsState());
   }
   async function pdfImage(P, doc, page, im, k, Hpt) {
-    const c = im.crop, plain = !im.rot && c[0] === 0 && c[1] === 0 && c[2] === 1 && c[3] === 1;
+    const c = im.crop, plain = c[0] === 0 && c[1] === 0 && c[2] === 1 && c[3] === 1;
     const png = im.mime === 'image/png';
     let bytes;
     if (plain && (png || im.mime === 'image/jpeg')) bytes = new Uint8Array(await im.blob.arrayBuffer());
-    else { // חיתוך / סיבוב / סוג אחר: מכינים את התמונה כמו שהיא מוצגת
+    else { // חיתוך / סוג אחר: מכינים את החלק שמוצג (הסיבוב נעשה ב-PDF עצמו)
       const b = await decodeImg(im);
       if (!b) return;
-      const sw = Math.max(1, Math.round((c[2] - c[0]) * b.width)), sh = Math.max(1, Math.round((c[3] - c[1]) * b.height));
-      const odd = im.rot % 180 !== 0, cv = document.createElement('canvas');
-      cv.width = odd ? sh : sw; cv.height = odd ? sw : sh;
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round((c[2] - c[0]) * b.width)); cv.height = Math.max(1, Math.round((c[3] - c[1]) * b.height));
       const g = cv.getContext('2d');
       if (!png) { g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); }
-      g.translate(cv.width / 2, cv.height / 2);
-      g.rotate(im.rot * Math.PI / 180);
-      g.drawImage(b, c[0] * b.width, c[1] * b.height, (c[2] - c[0]) * b.width, (c[3] - c[1]) * b.height, -sw / 2, -sh / 2, sw, sh);
+      g.drawImage(b, c[0] * b.width, c[1] * b.height, (c[2] - c[0]) * b.width, (c[3] - c[1]) * b.height, 0, 0, cv.width, cv.height);
       const blob = await new Promise((res) => cv.toBlob(res, png ? 'image/png' : 'image/jpeg', 0.92));
       if (!blob) throw new Error('encode');
       bytes = new Uint8Array(await blob.arrayBuffer());
     }
     const emb = png ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
-    page.drawImage(emb, { x: im.x * k, y: Hpt - (im.y + im.h) * k, width: im.w * k, height: im.h * k });
+    // הפינה השמאלית-תחתונה של התמונה; ב-PDF הציר למעלה, ולכן סיבוב עם כיוון השעון הוא שלילי
+    const [bx, by] = imgWorld(im, -im.iw / 2, im.ih / 2);
+    page.drawImage(emb, { x: bx * k, y: Hpt - by * k, width: im.iw * k, height: im.ih * k, rotate: P.degrees(-im.ang) });
   }
   // עמוד מהקובץ המקורי (וקטורי). אם אי אפשר (למשל קובץ מוצפן): כתמונה ברזולוציה גבוהה
   async function pdfSrcPage(P, srcDocs, bg) {
