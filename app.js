@@ -47,6 +47,7 @@
   let rendered = { s: 1, ox: 0, oy: 0 };
   let lastRenderMs = 0, lastRenderAt = 0, raf = 0, firstLayout = true;
   let strokes = [];                        // ממוינים לפי id (= סדר יצירה)
+  let images = [];                         // תמונות בעמוד (מצוירות מתחת לכתב), לפי סדר הוספה
 
   // מצבי עבודה (מוגדרים כאן כי הציור משתמש בהם)
   let live = null;        // הקו שנכתב עכשיו
@@ -120,7 +121,7 @@
     function open() {
       if (!dbp) {
         dbp = new Promise((res, rej) => {
-          const r = indexedDB.open('machberet', 2);
+          const r = indexedDB.open('machberet', 3);
           r.onupgradeneeded = (ev) => {
             const db = r.result;
             if (ev.oldVersion < 1) db.createObjectStore('strokes', { keyPath: 'id' }).createIndex('page', 'page');
@@ -128,6 +129,10 @@
               db.createObjectStore('folders', { keyPath: 'id' });
               db.createObjectStore('notebooks', { keyPath: 'id' });
               db.createObjectStore('thumbs', { keyPath: 'page' });
+            }
+            if (ev.oldVersion < 3) {
+              db.createObjectStore('images', { keyPath: 'id' }).createIndex('page', 'page'); // תמונות בעמוד
+              db.createObjectStore('files', { keyPath: 'id' });                              // קובצי PDF מיובאים
             }
           };
           r.onsuccess = () => res(r.result);
@@ -151,10 +156,17 @@
       });
     }
     const rec = (k) => ({ id: k.id, page: k.page, type: k.type, color: k.color, size: k.size, pts: k.pts });
+    const store = (k) => (k.img ? 'images' : 'strokes');
     return {
       load: (page) => run('strokes', 'readonly', (s) => s('strokes').index('page').getAll(page)),
-      put: (list) => run('strokes', 'readwrite', (s) => list.forEach((k) => s('strokes').put(rec(k)))),
-      del: (list) => run('strokes', 'readwrite', (s) => list.forEach((k) => s('strokes').delete(k.id))),
+      loadImgs: (page) => run('images', 'readonly', (s) => s('images').index('page').getAll(page)),
+      put: (list) => run(['strokes', 'images'], 'readwrite', (s) => list.forEach((k) => s(store(k)).put(k.img ? imgRec(k) : rec(k)))),
+      del: (list) => run(['strokes', 'images'], 'readwrite', (s) => list.forEach((k) => s(store(k)).delete(k.id))),
+      getFile: (id) => run('files', 'readonly', (s) => s('files').get(id)),
+      putFile: (r) => run('files', 'readwrite', (s) => { s('files').put(r); }),
+      fileIds: () => run('files', 'readonly', (s) => s('files').getAllKeys()),
+      delFiles: (ids) => run('files', 'readwrite', (s) => ids.forEach((id) => s('files').delete(id))),
+      putImgRecs: (list) => run('images', 'readwrite', (s) => list.forEach((r) => s('images').put(r))),
       all: (store) => run(store, 'readonly', (s) => s(store).getAll()),
       putRec: (store, r) => run(store, 'readwrite', (s) => { s(store).put(r); }),
       delRec: (store, key) => run(store, 'readwrite', (s) => { s(store).delete(key); }),
@@ -162,18 +174,22 @@
       putThumb: (page, blob) => run('thumbs', 'readwrite', (s) => { s('thumbs').put({ page, blob }); }),
       delThumbs: (pages) => run('thumbs', 'readwrite', (s) => pages.forEach((p) => s('thumbs').delete(p))),
       // מחיקת עמודים: כל הקווים שלהם והתמונה המוקטנת
-      delPages: (pages) => run(['strokes', 'thumbs'], 'readwrite', (s) => {
-        const st = s('strokes'), idx = st.index('page');
-        for (const p of pages) {
-          s('thumbs').delete(p);
-          const q = idx.getAllKeys(p);
-          q.onsuccess = () => q.result.forEach((k) => st.delete(k));
+      delPages: (pages) => run(['strokes', 'images', 'thumbs'], 'readwrite', (s) => {
+        for (const name of ['strokes', 'images']) {
+          const st = s(name), idx = st.index('page');
+          for (const p of pages) {
+            const q = idx.getAllKeys(p);
+            q.onsuccess = () => q.result.forEach((k) => st.delete(k));
+          }
         }
+        for (const p of pages) s('thumbs').delete(p);
       }),
-      restoreAll: (folders, nbs, strokes, pages) => run(['folders', 'notebooks', 'strokes', 'thumbs'], 'readwrite', (s) => {
+      restoreAll: (folders, nbs, strokes, pages, imgs, files) => run(['folders', 'notebooks', 'strokes', 'thumbs', 'images', 'files'], 'readwrite', (s) => {
         folders.forEach((f) => s('folders').put(f));
         nbs.forEach((n) => s('notebooks').put(n));
         strokes.forEach((r) => s('strokes').put(r));
+        imgs.forEach((r) => s('images').put(r));
+        files.forEach((r) => s('files').put(r));
         pages.forEach((p) => s('thumbs').delete(p));
       }),
       putStrokeRecs: (list) => run('strokes', 'readwrite', (s) => list.forEach((r) => s('strokes').put(r))),
@@ -297,6 +313,149 @@
     }
     const pad = rec.size * 1.5;
     return { id: rec.id, page: rec.page, type, color: rec.color, size: rec.size, pts, n, arc, total, bbox: [x0 - pad, y0 - pad, x1 + pad, y1 + pad], path: null };
+  }
+
+  // ===================== תמונות =====================
+  // תמונה בעמוד: מלבן (x,y,w,h) כפי שמוצג, סיבוב ברבעים סביב המרכז,
+  // וחיתוך [שמאל, עליון, ימין, תחתון] בשברים של התמונה המקורית. הקובץ עצמו (blob) נשמר ברשומה.
+  function makeImg(r) {
+    const crop = Array.isArray(r.crop) && r.crop.length === 4 ? r.crop.slice() : [0, 0, 1, 1];
+    return {
+      id: r.id, page: r.page, img: true, blob: r.blob, mime: r.mime || (r.blob && r.blob.type) || 'image/png',
+      x: r.x, y: r.y, w: r.w, h: r.h, rot: (((r.rot || 0) % 360) + 360) % 360, crop, bbox: [r.x, r.y, r.x + r.w, r.y + r.h],
+    };
+  }
+  function imgRec(k) { return { id: k.id, page: k.page, blob: k.blob, mime: k.mime, x: k.x, y: k.y, w: k.w, h: k.h, rot: k.rot, crop: k.crop }; }
+  const bmpCache = new WeakMap(); // blob -> ImageBitmap / Promise / 'bad'
+  function imgBitmap(im) { const v = im.blob && bmpCache.get(im.blob); return v && typeof v === 'object' && !(v instanceof Promise) ? v : null; }
+  function decodeImg(im) {
+    if (!im.blob) return Promise.resolve(null);
+    let v = bmpCache.get(im.blob);
+    if (!v) {
+      v = createImageBitmap(im.blob).then(
+        (b) => { bmpCache.set(im.blob, b); assetReady(); return b; },
+        (err) => { console.error(err); bmpCache.set(im.blob, 'bad'); return null; });
+      bmpCache.set(im.blob, v);
+    }
+    return v instanceof Promise ? v : Promise.resolve(v === 'bad' ? null : v);
+  }
+  function drawImg(ctx, im) {
+    const b = imgBitmap(im);
+    ctx.globalAlpha = 1;
+    if (!b) { decodeImg(im); ctx.fillStyle = 'rgba(128,128,128,0.15)'; ctx.fillRect(im.x, im.y, im.w, im.h); return; }
+    const c = im.crop, sx = c[0] * b.width, sy = c[1] * b.height, sw = (c[2] - c[0]) * b.width, sh = (c[3] - c[1]) * b.height;
+    const odd = im.rot % 180 !== 0, dw = odd ? im.h : im.w, dh = odd ? im.w : im.h;
+    ctx.save();
+    ctx.translate(im.x + im.w / 2, im.y + im.h / 2);
+    ctx.rotate(im.rot * Math.PI / 180);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'medium';
+    ctx.drawImage(b, sx, sy, sw, sh, -dw / 2, -dh / 2, dw, dh);
+    ctx.restore();
+  }
+  function drawItem(ctx, it) { if (it.img) drawImg(ctx, it); else drawInk(ctx, it); }
+
+  // ===================== רקע PDF (עמוד מיובא) =====================
+  // העמוד שומר רק הפניה: { file, n (מספר עמוד), h (גובה ביחידות דף) }. הציור נעשה ב-pdf.js לתמונה
+  // ברזולוציה שמתאימה לזום, אחת בכל פעם, ולא בזמן שהעט כותב.
+  function baseH(pg) { return pg && pg.bg ? pg.bg.h : PAGE_H0; }
+  function pageH(pg) { return (pg && pg.h) || baseH(pg); }
+  let pdfjsP = null;
+  function loadPdfjs() {
+    if (!pdfjsP) {
+      pdfjsP = import('./lib/pdf.min.js').then((m) => { m.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js'; return m; });
+      pdfjsP.catch(() => { pdfjsP = null; });
+    }
+    return pdfjsP;
+  }
+  async function fileBytes(id) {
+    const r = await DB.getFile(id);
+    if (!r || !r.blob) throw new Error('nofile');
+    return new Uint8Array(await r.blob.arrayBuffer());
+  }
+  const pdfDocs = new Map(); // file id -> Promise<PDFDocumentProxy>
+  function getPdf(id) {
+    let p = pdfDocs.get(id);
+    if (!p) {
+      p = (async () => { const pdfjs = await loadPdfjs(); return pdfjs.getDocument({ data: await fileBytes(id), isEvalSupported: false }).promise; })();
+      p.catch(() => pdfDocs.delete(id));
+      pdfDocs.set(id, p);
+    }
+    return p;
+  }
+  const BG_KEEP = 10, bgCache = new Map(), bgQueue = [];
+  let bgBusy = false, bgTimer = 0;
+  function bgMaxPx(pg) { return Math.max(64, Math.min(4096, Math.sqrt(12e6 * PAGE_W / pg.bg.h))); }
+  function bgEntry(pg) {
+    const k = pg.bg.file + ':' + pg.bg.n;
+    let e = bgCache.get(k);
+    if (e) { bgCache.delete(k); bgCache.set(k, e); return e; }
+    e = { pg, c: null, w: 0, want: 0, queued: false, err: false, waiters: [] };
+    bgCache.set(k, e);
+    for (const [kk, x] of bgCache) {
+      if (bgCache.size <= BG_KEEP) break;
+      if (x !== e && !x.queued && !x.waiters.length) { if (x.c) x.c.width = 0; bgCache.delete(kk); }
+    }
+    return e;
+  }
+  function bgKick(ms) { if (!bgTimer) bgTimer = setTimeout(() => { bgTimer = 0; bgPump(); }, ms); }
+  function bgCanvas(pg, px) {
+    const e = bgEntry(pg);
+    px = Math.min(Math.ceil(px), bgMaxPx(pg));
+    if (!e.err && e.w < px * 0.85 && e.want < px) {
+      e.want = px;
+      if (!e.queued) { e.queued = true; bgQueue.push(e); bgKick(e.c ? 150 : 0); }
+    }
+    return e.c;
+  }
+  function bgReady(pg, px) {
+    const e = bgEntry(pg);
+    bgCanvas(pg, px);
+    if (e.err || (e.c && !e.queued)) return Promise.resolve();
+    return new Promise((res) => e.waiters.push(res));
+  }
+  async function bgPump() {
+    if (bgBusy || !bgQueue.length) return;
+    if (live || penIsDown) { bgKick(300); return; }
+    bgBusy = true;
+    const e = bgQueue.shift();
+    try {
+      const doc = await getPdf(e.pg.bg.file);
+      const page = await doc.getPage(e.pg.bg.n);
+      const v1 = page.getViewport({ scale: 1 });
+      const vp = page.getViewport({ scale: e.want / v1.width });
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(vp.width)); c.height = Math.max(1, Math.round(vp.height));
+      const g = c.getContext('2d');
+      g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: g, viewport: vp }).promise;
+      if (e.c) e.c.width = 0;
+      e.c = c; e.w = c.width;
+    } catch (err) { console.error(err); e.err = true; }
+    e.queued = false;
+    bgBusy = false;
+    if (!e.err && e.w < e.want * 0.85) { e.queued = true; bgQueue.push(e); }
+    else { const w = e.waiters; e.waiters = []; w.forEach((f) => f()); }
+    assetReady();
+    bgPump();
+  }
+  function drawBg(ctx, pg) {
+    if (!pg || !pg.bg) return;
+    const c = bgCanvas(pg, Math.abs(ctx.getTransform().a) * PAGE_W);
+    if (!c) return;
+    ctx.globalAlpha = 1;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(c, 0, 0, PAGE_W, pg.bg.h);
+  }
+  // רקע / תמונה מוכנים: מציירים מחדש
+  let assetRaf = 0;
+  function assetReady() {
+    if (assetRaf) return;
+    assetRaf = requestAnimationFrame(() => {
+      assetRaf = 0;
+      for (const o of others.values()) o.cache = null;
+      invalidateCache(); requestRender();
+    });
   }
 
   let lastId = 0;
@@ -455,9 +614,14 @@
   // דף + קווים, בתחום הנראה בלבד
   function drawPage(ctx, gridLW, vx0, vy0, vx1, vy1) {
     drawPaper(ctx, curType, settings.dark, gridLW, vx0, vy0, vx1, vy1);
+    drawBg(ctx, curPg());
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, PAGE_W, PAGE_H); ctx.clip();
     const vis = (b) => !(b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1);
+    for (const im of images) {
+      if (renderHide && renderHide.has(im.id)) continue;
+      if (vis(im.bbox)) drawImg(ctx, im);
+    }
     for (const st of strokes) {
       if (renderHide && renderHide.has(st.id)) continue;
       if (vis(st.bbox)) drawInk(ctx, st);
@@ -487,7 +651,7 @@
     const out = [];
     let y = 0, cur = 0;
     for (const pg of curNb.pages) {
-      const h = pg.id === curPage ? PAGE_H : (pg.h || PAGE_H0);
+      const h = pg.id === curPage ? PAGE_H : pageH(pg);
       out.push({ pg, y, h });
       if (pg.id === curPage) cur = y;
       y += h + GAP;
@@ -497,10 +661,11 @@
   }
   function loadOther(id) {
     if (others.has(id)) return;
-    const info = { strokes: null, cache: null };
+    const info = { strokes: null, images: [], cache: null };
     others.set(id, info);
-    saveChain.then(() => DB.load(id)).then((recs) => {
+    saveChain.then(() => Promise.all([DB.load(id), DB.loadImgs(id)])).then(([recs, ims]) => {
       if (others.get(id) !== info) return;
+      info.images = ims.map(makeImg);
       info.strokes = recs.map(makeStroke);
       requestRender();
     }).catch((err) => { console.error(err); others.delete(id); });
@@ -513,7 +678,9 @@
     g.setTransform(cs, 0, 0, cs, 0, 0);
     withH(o.h, () => {
       drawPaper(g, o.pg.type, settings.dark, dpr / cs, 0, 0, PAGE_W, o.h);
+      drawBg(g, o.pg);
       g.save(); g.beginPath(); g.rect(0, 0, PAGE_W, o.h); g.clip();
+      for (const im of info.images) drawImg(g, im);
       for (const st of info.strokes) drawInk(g, st);
       g.restore();
     });
@@ -537,8 +704,10 @@
       const ly0 = Math.max(0, vy0 - o.rel), ly1 = Math.min(o.h, vy1 - o.rel);
       withH(o.h, () => {
         drawPaper(ctx, o.pg.type, settings.dark, 1 / s, vx0, ly0, vx1, ly1);
+        drawBg(ctx, o.pg);
         if (!info.strokes) return;
         ctx.save(); ctx.beginPath(); ctx.rect(0, 0, PAGE_W, o.h); ctx.clip();
+        for (const im of info.images) { const b = im.bbox; if (!(b[2] < vx0 || b[0] > vx1 || b[3] < ly0 || b[1] > ly1)) drawImg(ctx, im); }
         for (const st of info.strokes) { const b = st.bbox; if (!(b[2] < vx0 || b[0] > vx1 || b[3] < ly0 || b[1] > ly1)) drawInk(ctx, st); }
         ctx.restore();
       });
@@ -559,10 +728,10 @@
     if (!info || !info.strokes || !o) return false;
     clearSelection();
     saveCurThumb();
-    others.set(curPage, { strokes, cache: null });
+    others.set(curPage, { strokes, images, cache: null });
     others.delete(id);
     const pg = o.pg;
-    curPage = pg.id; curType = pg.type; PAGE_H = pg.h || PAGE_H0; strokes = info.strokes; pageDirty = false;
+    curPage = pg.id; curType = pg.type; PAGE_H = pageH(pg); strokes = info.strokes; images = info.images; pageDirty = false;
     settings.page = pg.id; saveSettings();
     if (curNb.last !== pg.id) { curNb.last = pg.id; saveRec('notebooks', curNb); }
     let h = histories.get(pg.id);
@@ -730,11 +899,17 @@
     strokes.splice(lo, 0, st);
     return lo === strokes.length - 1;
   }
+  // רשימות פעולה מכילות גם קווים וגם תמונות (it.img); תמונות נשמרות בנפרד ומצוירות מתחת לכתב
   function addStrokes(list, noRender) {
     if (!list.length) return;
     pageDirty = true;
     for (const st of list) {
-      if (insertSorted(st)) cacheAdd(st);
+      if (st.img) {
+        let i = images.length;
+        while (i > 0 && images[i - 1].id > st.id) i--;
+        images.splice(i, 0, st);
+        invalidateCache();
+      } else if (insertSorted(st)) cacheAdd(st);
       else invalidateCache();
     }
     persist(() => DB.put(list));
@@ -745,6 +920,7 @@
     pageDirty = true;
     const ids = new Set(list.map((s) => s.id));
     strokes = strokes.filter((s) => !ids.has(s.id));
+    if (list.some((s) => s.img)) images = images.filter((s) => !ids.has(s.id));
     invalidateCache();
     persist(() => DB.del(list));
     requestRender();
@@ -1171,7 +1347,34 @@
       for (const r of inRuns) items.push(mk(r));
       for (const r of outRuns) keep.push(mk(r));
     }
+    // תמונה נבחרת שלמה (לא נחתכת) אם המרכז שלה בתוך הלאסו; במצב "קו שלם" גם אם פינה בפנים
+    for (const im of images) {
+      const b = im.bbox;
+      if (inPoly(poly, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) || (settings.lassoMode === 'whole' &&
+        (inPoly(poly, b[0], b[1]) || inPoly(poly, b[2], b[1]) || inPoly(poly, b[2], b[3]) || inPoly(poly, b[0], b[3])))) {
+        items.push(im); whole.push(im);
+      }
+    }
     return { poly, items, whole, remove, keep };
+  }
+  const rectPoly = (b) => [b[0], b[1], b[2], b[1], b[2], b[3], b[0], b[3]];
+  // בחירה של פריטים שלמים; תמונה בודדת מקבלת מסגרת מלבנית וכפתורי חיתוך/סיבוב
+  function makeSel(items, poly, crop) {
+    const one = items.length === 1 && items[0].img ? items[0] : null;
+    return { poly: one ? rectPoly(one.bbox) : poly, items, whole: items, remove: [], keep: [], img: one, crop: !!(one && crop) };
+  }
+  function imageAt(x, y) {
+    for (let i = images.length - 1; i >= 0; i--) {
+      const b = images[i].bbox;
+      if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) return images[i];
+    }
+    return null;
+  }
+  function selectImage(im) {
+    clearSelection();
+    sel = makeSel([im]);
+    updateUI();
+    drawSelOverlay();
   }
 
   function startLasso(e, x, y) {
@@ -1202,12 +1405,15 @@
     const P = lassoLive.pts;
     lassoLive = null;
     overlayDirty = true; clearOverlay();
-    if (P.length < 6) return;
     const b = polyBox(P);
-    if ((b[2] - b[0]) * view.s < 6 && (b[3] - b[1]) * view.s < 6) return;
+    if (P.length < 6 || ((b[2] - b[0]) * view.s < 6 && (b[3] - b[1]) * view.s < 6)) {
+      const im = imageAt(P[0], P[1]); // הקשה בלאסו על תמונה: בוחרת אותה
+      if (im) selectImage(im);
+      return;
+    }
     const S = computeSelection(P);
     if (!S.items.length) return;
-    sel = S;
+    sel = S.items.length === 1 && S.items[0].img ? makeSel(S.items) : S;
     updateUI();
     drawSelOverlay();
   }
@@ -1232,16 +1438,19 @@
     clearOverlay();
     if (!sel) return;
     const T = selDrag ? selDrag.T : { k: 1, tx: 0, ty: 0 }, s = rendered.s;
+    const cropping = selDrag && selDrag.mode === 'crop' && selDrag.preview;
     setWorld(octx, rendered);
     if (selDrag && selDrag.lifted) {
       octx.save();
       octx.beginPath(); octx.rect(0, 0, PAGE_W, PAGE_H); octx.clip();
       octx.transform(T.k, 0, 0, T.k, T.tx, T.ty);
-      for (const st of sel.items) drawInk(octx, st);
+      const list = cropping ? [selDrag.preview] : sel.items;
+      for (const it of list) if (it.img) drawImg(octx, it);
+      for (const it of list) if (!it.img) drawInk(octx, it);
       octx.restore();
       octx.globalAlpha = 1;
     }
-    const poly = tPoly(sel.poly, T);
+    const poly = cropping ? rectPoly(selDrag.preview.bbox) : tPoly(sel.poly, T);
     octx.beginPath();
     octx.moveTo(poly[0], poly[1]);
     for (let i = 2; i < poly.length; i += 2) octx.lineTo(poly[i], poly[i + 1]);
@@ -1261,13 +1470,51 @@
       octx.lineWidth = 2 / s;
       octx.stroke();
     }
+    if (sel.crop) { // מצב חיתוך: פסים באמצע כל צלע, גוררים אותם פנימה
+      octx.lineCap = 'round';
+      octx.lineWidth = 6 / s;
+      octx.strokeStyle = SEL_BLUE;
+      const b = polyBox(poly);
+      for (const [mx, my, e] of cropMids(b)) {
+        const L = Math.min(14 / s, (e % 2 ? b[2] - b[0] : b[3] - b[1]) / 4);
+        octx.beginPath();
+        if (e % 2) { octx.moveTo(mx - L, my); octx.lineTo(mx + L, my); } else { octx.moveTo(mx, my - L); octx.lineTo(mx, my + L); }
+        octx.stroke();
+      }
+      octx.lineCap = 'butt';
+    }
     overlayDirty = true;
+  }
+  // אמצע הצלעות לפי הסדר: שמאל, עליון, ימין, תחתון
+  function cropMids(b) {
+    const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+    return [[b[0], cy, 0], [cx, b[1], 1], [b[2], cy, 2], [cx, b[3], 3]];
+  }
+  // חיתוך: הצלע i של המלבן המוצג זזה פנימה ב-d (בציר שלה); החיתוך בתמונה המקורית מחושב לפי הסיבוב
+  function cropImg(im, i, d) {
+    const a0 = i < 2 ? d : -d;
+    const k = Math.round(im.rot / 90) % 4, j = (i - k + 4) % 4;
+    const c = im.crop.slice();
+    const span = j % 2 === 0 ? c[2] - c[0] : c[3] - c[1];
+    const disp = i % 2 === 0 ? im.w : im.h;
+    const minSpan = Math.min(span, Math.max(0.02, span * 20 / disp));
+    const room = j === 0 ? c[0] : j === 1 ? c[1] : j === 2 ? 1 - c[2] : 1 - c[3]; // כמה אפשר להחזיר החוצה
+    const sd = Math.max(-room, Math.min(a0 / disp * span, span - minSpan));
+    if (j === 0) c[0] += sd; else if (j === 1) c[1] += sd; else if (j === 2) c[2] -= sd; else c[3] -= sd;
+    const a = sd / span * disp;
+    let x = im.x, y = im.y, w = im.w, h = im.h;
+    if (i === 0) { x += a; w -= a; } else if (i === 1) { y += a; h -= a; } else if (i === 2) w -= a; else h -= a;
+    return makeImg(Object.assign(imgRec(im), { x, y, w, h, crop: c }));
   }
 
   function selHit(x, y, touch) {
+    const near = touch ? 32 : 24;
+    if (sel.crop && sel.img) {
+      for (const [mx, my, e] of cropMids(sel.img.bbox)) if (Math.hypot(x - mx, y - my) * view.s < near) return { mode: 'crop', edge: e };
+    }
     const hs = selHandles(sel.poly, view.s);
     for (let i = 0; i < 4; i++) {
-      if (Math.hypot(x - hs[i][0], y - hs[i][1]) * view.s < (touch ? 32 : 24)) return { mode: 'scale', h: hs[i], anchor: hs[(i + 2) % 4] };
+      if (Math.hypot(x - hs[i][0], y - hs[i][1]) * view.s < near) return { mode: 'scale', h: hs[i], anchor: hs[(i + 2) % 4] };
     }
     if (inPoly(sel.poly, x, y)) return { mode: 'move' };
     return null;
@@ -1276,6 +1523,7 @@
     selDrag = {
       pointerId: e.pointerId, touch: e.pointerType === 'touch', mode: hit.mode, h: hit.h, anchor: hit.anchor,
       x0: x, y0: y, sx: e.clientX, sy: e.clientY, lifted: false, T: { k: 1, tx: 0, ty: 0 },
+      edge: hit.edge, orig: sel.img, preview: null,
     };
   }
   // גרירה באצבע שהופסקה (אצבע שנייה לזום / העט נגע): מחזירים את הבחירה למקומה בלי שינוי
@@ -1296,7 +1544,8 @@
       render();
     }
     const x = wx(e.clientX), y = wy(e.clientY);
-    if (D.mode === 'move') D.T = { k: 1, tx: x - D.x0, ty: y - D.y0 };
+    if (D.mode === 'crop') D.preview = cropImg(D.orig, D.edge, D.edge % 2 === 0 ? x - D.x0 : y - D.y0);
+    else if (D.mode === 'move') D.T = { k: 1, tx: x - D.x0, ty: y - D.y0 };
     else {
       const [ax, ay] = D.anchor, vx = D.h[0] - ax, vy = D.h[1] - ay;
       const b = polyBox(sel.poly), big = Math.max(b[2] - b[0], b[3] - b[1], 1);
@@ -1307,6 +1556,7 @@
     drawSelOverlay();
   }
   function transformStroke(st, T) {
+    if (st.img) return makeImg(Object.assign(imgRec(st), { id: newId(), page: curPage, x: st.x * T.k + T.tx, y: st.y * T.k + T.ty, w: st.w * T.k, h: st.h * T.k }));
     const src = st.pts, pts = new Float32Array(src.length);
     for (let i = 0; i < src.length; i += 3) {
       pts[i] = src[i] * T.k + T.tx; pts[i + 1] = src[i + 1] * T.k + T.ty; pts[i + 2] = src[i + 2];
@@ -1316,6 +1566,16 @@
   function endSelDrag() {
     const D = selDrag;
     selDrag = null;
+    if (D.mode === 'crop') {
+      renderHide = renderExtra = null;
+      const p = D.preview, o = D.orig;
+      if (!D.lifted || !p || (p.x === o.x && p.y === o.y && p.w === o.w && p.h === o.h)) { if (D.lifted) render(); else drawSelOverlay(); return; }
+      p.id = newId();
+      sel = makeSel([p], null, true);
+      commit({ add: [p], remove: [o] });
+      render();
+      return;
+    }
     if (!D.lifted || (D.T.k === 1 && D.T.tx === 0 && D.T.ty === 0)) {
       renderHide = renderExtra = null;
       if (D.lifted) render(); else drawSelOverlay();
@@ -1324,7 +1584,7 @@
     const moved = sel.items.map((st) => transformStroke(st, D.T));
     const action = { add: sel.keep.concat(moved), remove: sel.whole.concat(sel.remove) };
     renderHide = renderExtra = null;
-    sel = { poly: tPoly(sel.poly, D.T), items: moved, whole: moved, remove: [], keep: [] };
+    sel = makeSel(moved, tPoly(sel.poly, D.T), sel.crop);
     commit(action);
     render();
   }
@@ -1333,9 +1593,34 @@
     if (!sel || busy()) return;
     const T = { k: 1, tx: GRID, ty: GRID };
     const copies = sel.items.map((st) => transformStroke(st, T));
-    sel = { poly: tPoly(sel.poly, T), items: copies, whole: copies, remove: [], keep: [] };
+    sel = makeSel(copies, tPoly(sel.poly, T));
     commit({ add: copies, remove: [] });
     render();
+    updateUI();
+  }
+  // מחיקת הבחירה (קו שנחתך בגבול הלאסו: נשאר החלק שמחוץ לבחירה)
+  function deleteSelection() {
+    if (!sel || busy()) return;
+    const S = sel;
+    clearSelection();
+    commit({ add: S.keep, remove: S.whole.concat(S.remove) });
+    render();
+  }
+  // סיבוב תמונה ברבע סיבוב (עם כיוון השעון), סביב המרכז
+  function rotateSelImg() {
+    if (!sel || !sel.img || busy()) return;
+    const im = sel.img, cx = im.x + im.w / 2, cy = im.y + im.h / 2;
+    const n = makeImg(Object.assign(imgRec(im), { id: newId(), rot: im.rot + 90, x: cx - im.h / 2, y: cy - im.w / 2, w: im.h, h: im.w }));
+    sel = makeSel([n], null, sel.crop);
+    commit({ add: [n], remove: [im] });
+    render();
+    updateUI();
+  }
+  function toggleCrop() {
+    if (!sel || !sel.img || busy()) return;
+    sel.crop = !sel.crop;
+    drawSelOverlay();
+    updateUI();
   }
 
   // העתקה והדבקה בלחיצה ארוכה באצבע: מעתיקים מהבחירה, ומדביקים במקום שבו לוחצים לחיצה ארוכה
@@ -1344,7 +1629,7 @@
     if (!sel) return;
     const b = polyBox(sel.poly);
     clipboard = {
-      items: sel.items.map((st) => ({ page: curPage, type: st.type, color: st.color, size: st.size, pts: Float32Array.from(st.pts) })),
+      items: sel.items.map((st) => (st.img ? makeImg(imgRec(st)) : { page: curPage, type: st.type, color: st.color, size: st.size, pts: Float32Array.from(st.pts) })),
       poly: sel.poly.slice(), cx: (b[0] + b[2]) / 2, cy: (b[1] + b[3]) / 2,
     };
   }
@@ -1353,7 +1638,7 @@
     clearSelection();
     const T = { k: 1, tx: x - clipboard.cx, ty: y - clipboard.cy };
     const copies = clipboard.items.map((st) => transformStroke(st, T));
-    sel = { poly: tPoly(clipboard.poly, T), items: copies, whole: copies, remove: [], keep: [] };
+    sel = makeSel(copies, tPoly(clipboard.poly, T));
     commit({ add: copies, remove: [] });
     render();
     updateUI();
@@ -1969,6 +2254,8 @@
     pops.lasso.querySelectorAll('[data-lmode]').forEach((b) => b.classList.toggle('active', b.dataset.lmode === settings.lassoMode));
     [...colorsEl.children].forEach((b) => b.classList.toggle('active', b.dataset.color === it.color));
     $('#selGroup').hidden = !sel;
+    $('#imgCrop').hidden = $('#imgRot').hidden = !(sel && sel.img);
+    $('#imgCrop').classList.toggle('active', !!(sel && sel.crop));
     // תפריט העט
     pops.pen.querySelectorAll('[data-ptype]').forEach((b) => b.classList.toggle('active', b.dataset.ptype === settings.penType));
     paintSizes(sizesEl, k, inkActive);
@@ -2090,6 +2377,9 @@
   $('#undo').addEventListener('click', undo);
   $('#redo').addEventListener('click', redo);
   $('#selCopy').addEventListener('click', copySelection);
+  $('#selDel').addEventListener('click', deleteSelection);
+  $('#imgCrop').addEventListener('click', toggleCrop);
+  $('#imgRot').addEventListener('click', rotateSelImg);
 
   // ===================== חלון שאלה (שם, אישור, רשימת פעולות) =====================
   const dlg = $('#dlg'), dlgTitle = dlg.querySelector('.dlg-title'), dlgInput = dlg.querySelector('.dlg-input');
@@ -2174,6 +2464,7 @@
     copy: 'M9 9h10v10H9z M15 9V5H5v10h4',
     sort: 'M7 5v14 M4 16l3 3 3-3 M17 19V5 M14 8l3-3 3 3',
     down: 'M12 5v14 M6 13l6 6 6-6',
+    pdf: 'M6 3h8l4 4v14H6z M14 3v4h4 M9 13h6 M9 17h4',
   };
   const popMenuEl = $('#popMenu');
   let popResolve = null;
@@ -2265,22 +2556,24 @@
     const tok = ++loadToken;
     loading = true;
     others.clear();
-    curNb = nb; curPage = pg.id; curType = pg.type; PAGE_H = pg.h || PAGE_H0;
+    curNb = nb; curPage = pg.id; curType = pg.type; PAGE_H = pageH(pg);
     settings.nb = nb.id; settings.page = pg.id; saveSettings();
     if (nb.last !== pg.id) { nb.last = pg.id; saveRec('notebooks', nb); }
     let h = histories.get(pg.id);
     if (!h) { h = { u: [], r: [] }; histories.set(pg.id, h); }
     undoStack = h.u; redoStack = h.r;
     updateUndoUI();
-    strokes = []; pageDirty = false;
+    strokes = []; images = []; pageDirty = false;
     view.oy = MARGIN; clampView();
     invalidateCache(); render();
     updatePageUI();
     if (!pagesPanel.hidden) renderPagesPanel();
     try {
       await saveChain;
-      const recs = await DB.load(pg.id);
+      const [recs, ims] = await Promise.all([DB.load(pg.id), DB.loadImgs(pg.id)]);
       if (tok !== loadToken) return;
+      images = ims.map(makeImg).sort((a, b) => a.id - b.id);
+      if (images.length) lastId = Math.max(lastId, images[images.length - 1].id);
       strokes = recs.map(makeStroke).sort((a, b) => a.id - b.id);
       if (strokes.length) lastId = Math.max(lastId, strokes[strokes.length - 1].id);
     } catch (err) {
@@ -2290,6 +2583,14 @@
     }
     loading = false;
     invalidateCache(); render();
+  }
+
+  // קווים ותמונות של עמוד (מהזיכרון אם הוא הפתוח, אחרת מהאחסון)
+  async function pageData(pid) {
+    if (pid === curPage && !loading) return { strokes: strokes.slice(), images: images.slice() };
+    await saveChain;
+    const [s, i] = await Promise.all([DB.load(pid), DB.loadImgs(pid)]);
+    return { strokes: s.map(makeStroke).sort((a, b) => a.id - b.id), images: i.map(makeImg).sort((a, b) => a.id - b.id) };
   }
 
   function updatePageUI() {
@@ -2314,12 +2615,9 @@
 
   // ----- תמונות מוקטנות -----
   const TH_W = 240, thumbUrls = new Map();
-  function thumbCanvas(list, type) {
-    const savedH = PAGE_H;
-    PAGE_H = PAGE_H0; // תמונה מוקטנת: החלק העליון של הדף
-    try { return thumbCanvas0(list, type); } finally { PAGE_H = savedH; }
-  }
-  function thumbCanvas0(list, type) {
+  // תמונה מוקטנת: החלק העליון של הדף (בגובה רגיל, או בגובה השקופית בעמוד PDF)
+  function thumbCanvas(pg, list, imgs) { return withH(baseH(pg), () => thumbCanvas0(pg, list, imgs)); }
+  function thumbCanvas0(pg, list, imgs) {
     const k = TH_W / PAGE_W, c = document.createElement('canvas');
     c.width = TH_W; c.height = Math.round(PAGE_H * k);
     const g = c.getContext('2d');
@@ -2327,9 +2625,11 @@
     const wasDark = inkDark;
     inkDark = false; // תמונה מוקטנת תמיד בהירה
     try {
-      drawPaper(g, type, false, 0.8 / k, 0, 0, PAGE_W, PAGE_H);
+      drawPaper(g, pg.type, false, 0.8 / k, 0, 0, PAGE_W, PAGE_H);
+      drawBg(g, pg);
       g.save();
       g.beginPath(); g.rect(0, 0, PAGE_W, PAGE_H); g.clip();
+      for (const im of imgs) drawImg(g, im);
       for (const st of list) drawInk(g, st);
       g.restore();
     } finally { inkDark = wasDark; }
@@ -2340,20 +2640,28 @@
     if (old) URL.revokeObjectURL(old);
     if (blob) thumbUrls.set(page, URL.createObjectURL(blob)); else thumbUrls.delete(page);
   }
-  function saveThumb(page, list, type) {
-    const c = thumbCanvas(list, type);
+  // מחכים שהרקע והתמונות מוכנים (עד 8 שניות), ואז מציירים
+  async function assetsReady(pg, imgs, px) {
+    const jobs = imgs.map(decodeImg);
+    if (pg.bg) jobs.push(bgReady(pg, px));
+    if (jobs.length) await Promise.race([Promise.all(jobs), new Promise((r) => setTimeout(r, 8000))]);
+  }
+  async function saveThumb(pg, list, imgs) {
+    await assetsReady(pg, imgs, TH_W * 2);
+    const c = thumbCanvas(pg, list, imgs);
     return new Promise((res) => c.toBlob((b) => {
-      if (b) { setThumbUrl(page, b); persist(() => DB.putThumb(page, b)); }
+      if (b) { setThumbUrl(pg.id, b); persist(() => DB.putThumb(pg.id, b)); }
       res(b);
     }, 'image/webp', 0.85));
   }
   // העמוד הנוכחי השתנה: מעדכנים את התמונה המוקטנת ואת תאריך העדכון של המחברת
   function saveCurThumb() {
-    if (!pageDirty || !curNb || !curPage || loading) return Promise.resolve();
+    const pg = curPg();
+    if (!pageDirty || !curNb || !pg || loading) return Promise.resolve();
     pageDirty = false;
     curNb.updated = Date.now();
     saveRec('notebooks', curNb);
-    return saveThumb(curPage, strokes.slice(), curType);
+    return saveThumb(Object.assign({}, pg), strokes.slice(), images.slice());
   }
   async function thumbUrl(pg) {
     if (pg.id === curPage) await saveCurThumb();
@@ -2361,8 +2669,8 @@
     if (u) return u;
     const blob = await DB.getThumb(pg.id);
     if (blob) { setThumbUrl(pg.id, blob); return thumbUrls.get(pg.id); }
-    const list = pg.id === curPage ? strokes.slice() : (await DB.load(pg.id)).map(makeStroke);
-    await saveThumb(pg.id, list, pg.type);
+    const d = await pageData(pg.id);
+    await saveThumb(pg, d.strokes, d.images);
     return thumbUrls.get(pg.id);
   }
   // טוען תמונות אחת-אחת (כדי לא להעמיס), ועוצר אם התצוגה התחלפה
@@ -2679,9 +2987,11 @@
   $('#libAdd').addEventListener('click', async (e) => {
     e.stopPropagation();
     const a = await popMenu(e.currentTarget, [
-      { label: 'מחברת חדשה', icon: 'book', value: 'nb' }, { label: 'תיקייה חדשה', icon: 'folder', value: 'folder' }]);
+      { label: 'מחברת חדשה', icon: 'book', value: 'nb' }, { label: 'תיקייה חדשה', icon: 'folder', value: 'folder' },
+      { label: 'ייבוא PDF (מחברת חדשה)', icon: 'pdf', value: 'pdf' }]);
     if (a === 'nb') newNotebookDialog();
     else if (a === 'folder') newFolderDialog();
+    else if (a === 'pdf') pickPdf('new');
   });
   $('#libClose').addEventListener('click', closeLibrary);
   $('#libBtn').addEventListener('click', openLibrary);
@@ -2917,8 +3227,9 @@
     const a = await popMenu(anchor, [
       { label: 'שינוי שם', icon: 'rename', value: 'ren' }, { label: 'שינוי צבע', icon: 'cover', value: 'color' },
       { label: 'העברה לתיקייה אחרת', icon: 'move', value: 'move' }, { label: 'שכפול', icon: 'copy', value: 'dup' },
-      { label: 'גיבוי המחברת לקובץ', icon: 'backup', value: 'backup' }, '-',
+      { label: 'גיבוי המחברת לקובץ', icon: 'backup', value: 'backup' }, { label: 'ייצוא ל-PDF', icon: 'pdf', value: 'pdf' }, '-',
       { label: 'מחיקה', icon: 'del', value: 'del', danger: true }], nb.name);
+    if (a === 'pdf') { exportPdf(nb.pages.slice(), nb.name); return; }
     if (a === 'ren') {
       const n = await askName('שם המחברת', nb.name, 'שמירה');
       if (n) { nb.name = n; saveRec('notebooks', nb); renderLibrary(); updatePageUI(); }
@@ -2995,7 +3306,18 @@
     }
     persist(() => DB.delPages(pages));
     for (const p of pages) { histories.delete(p); setThumbUrl(p, null); }
+    gcFiles();
     if (hasCur) { curNb = null; curPage = null; await openLatest(); }
+  }
+  // קובצי PDF שאף עמוד (גם בסל) כבר לא משתמש בהם נמחקים
+  function gcFiles() {
+    const used = new Set();
+    for (const nb of lib.notebooks.values()) for (const p of nb.pages) if (p.bg) used.add(p.bg.file);
+    persist(async () => {
+      const ids = (await DB.fileIds()).filter((id) => !used.has(id));
+      if (ids.length) await DB.delFiles(ids);
+      for (const id of ids) pdfDocs.delete(id);
+    });
   }
 
   // ----- שכפול -----
@@ -3007,10 +3329,13 @@
       const np = { id: uid(), type: pg.type };
       if (pg.grow) np.grow = true;
       if (pg.h) np.h = pg.h;
+      if (pg.bg) np.bg = Object.assign({}, pg.bg); // אותו קובץ PDF, משותף
       pages.push(np);
-      const src = pg.id === curPage ? strokes : await DB.load(pg.id);
-      const recs = src.map((s) => ({ id: newId(), page: np.id, type: s.type, color: s.color, size: s.size, pts: Float32Array.from(s.pts) }));
+      const src = await pageData(pg.id);
+      const recs = src.strokes.map((s) => ({ id: newId(), page: np.id, type: s.type, color: s.color, size: s.size, pts: Float32Array.from(s.pts) }));
       if (recs.length) await persist(() => DB.putStrokeRecs(recs));
+      const irecs = src.images.map((im) => Object.assign(imgRec(im), { id: newId(), page: np.id }));
+      if (irecs.length) await persist(() => DB.putImgRecs(irecs));
     }
     const copy = { id: uid(), name: (nb.name + suffix).slice(0, 90), parent, cover: nb.cover, created: now, updated: now, pages, last: pages[0].id };
     await persist(() => DB.putRec('notebooks', copy));
@@ -3084,22 +3409,45 @@
         name = f ? f.name : 'תיקייה';
       }
       const r2 = (v) => Math.round(v * 100) / 100;
-      const parts = ['{"app":"machberet","version":1,"exported":' + JSON.stringify(new Date().toISOString()) +
+      const parts = ['{"app":"machberet","version":2,"exported":' + JSON.stringify(new Date().toISOString()) +
         ',"folders":' + JSON.stringify(folders) + ',"notebooks":' + JSON.stringify(nbs) + ',"strokes":['];
-      let count = 0;
+      let count = 0, icount = 0, fcount = 0;
+      const fileIds = new Set();
       for (const nb of nbs) {
         for (const pg of nb.pages) {
+          if (pg.bg) fileIds.add(pg.bg.file);
           for (const s of await DB.load(pg.id)) {
             parts.push((count ? ',' : '') + JSON.stringify({ id: s.id, page: s.page, type: s.type, color: s.color, size: s.size, pts: Array.from(s.pts, r2) }));
             count++;
           }
         }
       }
+      // תמונות וקובצי PDF: התוכן עצמו בתוך הקובץ (base64), כדי שהגיבוי יהיה שלם
+      parts.push('],"images":[');
+      for (const nb of nbs) {
+        for (const pg of nb.pages) {
+          for (const r of await DB.loadImgs(pg.id)) {
+            const o = imgRec(r);
+            delete o.blob;
+            o.data = await blobB64(r.blob);
+            parts.push((icount ? ',' : '') + JSON.stringify(o));
+            icount++;
+          }
+        }
+      }
+      parts.push('],"files":[');
+      for (const id of fileIds) {
+        const r = await DB.getFile(id);
+        if (!r || !r.blob) continue;
+        parts.push((fcount ? ',' : '') + JSON.stringify({ id, name: r.name || '', mime: r.blob.type || 'application/pdf', data: await blobB64(r.blob) }));
+        fcount++;
+      }
       parts.push(']}');
       const blob = new Blob(parts, { type: 'application/json' });
       // בדיקה: קוראים את הקובץ בחזרה ומוודאים שהכול שם
       const back = validateBackup(JSON.parse(await blob.text()));
       if (!back || back.nbs.length !== nbs.length || back.folders.length !== folders.length || back.recs.length !== count ||
+        back.imgs.length !== icount || back.files.length !== fcount ||
         back.nbs.some((n, i) => n.name !== nbs[i].name || n.pages.length !== nbs[i].pages.length)) throw new Error('verify');
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -3119,10 +3467,37 @@
   // ----- שחזור: קודם בודקים את כל הקובץ, ורק אז כותבים (בפעולה אחת) -----
   const STROKE_TYPES = ['felt', 'fountain', 'brush', 'pencil', 'hl'];
   const str = (v, def) => (v === undefined || v === null ? def : String(v)).slice(0, 200);
+  function blobB64(b) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result).split(',')[1] || '');
+      r.onerror = () => rej(r.error);
+      r.readAsDataURL(b);
+    });
+  }
+  function b64Blob(s, type) {
+    const bin = atob(s), u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return new Blob([u], { type });
+  }
+  const fin = (v) => typeof v === 'number' && isFinite(v);
   function validateBackup(data) {
     if (!data || data.app !== 'machberet' || !Array.isArray(data.notebooks) || !Array.isArray(data.strokes)) return null;
     if (data.folders !== undefined && !Array.isArray(data.folders)) return null;
-    const folders = [], nbs = [], recs = [], pages = [];
+    if ((data.images !== undefined && !Array.isArray(data.images)) || (data.files !== undefined && !Array.isArray(data.files))) return null;
+    const folders = [], nbs = [], recs = [], pages = [], imgs = [], files = [];
+    try {
+      for (const f of data.files || []) {
+        if (!f || typeof f.id !== 'string' || !f.id || typeof f.data !== 'string') return null;
+        files.push({ id: f.id, name: str(f.name, ''), blob: b64Blob(f.data, typeof f.mime === 'string' ? f.mime : 'application/pdf') });
+      }
+      for (const m of data.images || []) {
+        if (!m || !fin(m.id) || typeof m.page !== 'string' || typeof m.data !== 'string' || ![m.x, m.y, m.w, m.h].every(fin) || !(m.w > 0 && m.h > 0)) return null;
+        const crop = Array.isArray(m.crop) && m.crop.length === 4 && m.crop.every(fin) ? m.crop : [0, 0, 1, 1];
+        const mime = typeof m.mime === 'string' ? m.mime : 'image/png';
+        imgs.push({ id: m.id, page: m.page, blob: b64Blob(m.data, mime), mime, x: m.x, y: m.y, w: m.w, h: m.h, rot: [0, 90, 180, 270].includes(m.rot) ? m.rot : 0, crop });
+      }
+    } catch (e) { return null; } // base64 פגום
     for (const f of data.folders || []) {
       if (!f || typeof f.id !== 'string' || !f.id) return null;
       const r = { id: f.id, name: str(f.name, 'תיקייה'), parent: typeof f.parent === 'string' ? f.parent : '', created: +f.created || Date.now() };
@@ -3138,7 +3513,13 @@
         const np = { id: p.id, type: PAPER_TYPES.includes(p.type) ? p.type : 'grid' };
         if (p.fav) np.fav = true;
         if (p.grow) np.grow = true;
-        if (+p.h > PAGE_H0) np.h = +p.h;
+        // עמוד PDF: הפניה לקובץ (שנמצא בגיבוי, או כבר כאן)
+        if (p.bg) {
+          const b = p.bg;
+          if (typeof b.file !== 'string' || !Number.isInteger(b.n) || b.n < 1 || !(b.h > 0) || !fin(b.h)) return null;
+          np.bg = { file: b.file, n: b.n, h: b.h };
+        }
+        if (+p.h > baseH(np)) np.h = +p.h;
         ps.push(np);
         pages.push(p.id);
       }
@@ -3157,7 +3538,7 @@
       for (const v of s.pts) if (typeof v !== 'number' || !isFinite(v)) return null;
       recs.push({ id: s.id, page: s.page, type: STROKE_TYPES.includes(s.type) ? s.type : 'fountain', color: typeof s.color === 'string' ? s.color : '#000000', size: +s.size || 2.5, pts: Float32Array.from(s.pts) });
     }
-    return { folders, nbs, recs, pages };
+    return { folders, nbs, recs, pages, imgs, files };
   }
   const restoreFile = $('#restoreFile');
   restoreFile.addEventListener('change', async () => {
@@ -3192,7 +3573,8 @@
       const pages = nb.pages.concat(old ? old.pages.filter((p) => !nb.pages.some((q) => q.id === p.id)) : []);
       return Object.assign({}, old || {}, nb, { pages, parent: nb.parent && known.has(nb.parent) ? nb.parent : '' });
     });
-    await DB.restoreAll(fRecs, nRecs, v.recs, v.pages); // הכול או כלום
+    await DB.restoreAll(fRecs, nRecs, v.recs, v.pages, v.imgs, v.files); // הכול או כלום
+    for (const f of v.files) pdfDocs.delete(f.id);
     for (const f of fRecs) { const o = lib.folders.get(f.id); if (o) Object.assign(o, f); else lib.folders.set(f.id, f); }
     for (const n of nRecs) { const o = lib.notebooks.get(n.id); if (o) Object.assign(o, n); else lib.notebooks.set(n.id, n); }
     for (const p of v.pages) { setThumbUrl(p, null); histories.delete(p); }
@@ -3227,14 +3609,328 @@
     const pg = curPg();
     if (!pg) return;
     let bottom = 0;
-    for (const st of strokes) if (st.bbox) bottom = Math.max(bottom, st.bbox[3]);
-    const h = Math.max(PAGE_H0, Math.ceil((bottom + 4 * GRID) / GRID) * GRID);
-    if (h >= PAGE_H) { toast(PAGE_H <= PAGE_H0 ? 'הדף כבר בגודל רגיל' : 'אין חלק ריק להסרה בסוף הדף'); return; }
+    for (const st of strokes.concat(images)) if (st.bbox) bottom = Math.max(bottom, st.bbox[3]);
+    const base = baseH(pg), h = Math.max(base, Math.ceil((bottom + 4 * GRID) / GRID) * GRID);
+    if (h >= PAGE_H) { toast(PAGE_H <= base ? 'הדף כבר בגודל רגיל' : 'אין חלק ריק להסרה בסוף הדף'); return; }
     PAGE_H = h;
-    if (h > PAGE_H0) pg.h = h; else delete pg.h;
+    if (h > base) pg.h = h; else delete pg.h;
     saveRec('notebooks', curNb);
     invalidateCache(); clampView(); render();
     toast('הדף הוקטן');
+  }
+
+  function downloadBlob(blob, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  }
+
+  // ===================== ייבוא PDF =====================
+  // הקובץ נשמר פעם אחת; כל עמוד במחברת מפנה לעמוד שלו בקובץ, וכותבים מעליו כמו על דף ריק
+  const pdfFile = $('#pdfFile');
+  let pdfTarget = 'new', importBusy = false;
+  function pickPdf(target) { pdfTarget = target; pdfFile.click(); }
+  pdfFile.addEventListener('change', () => {
+    const f = pdfFile.files[0];
+    pdfFile.value = '';
+    if (f) importPdf(f, pdfTarget);
+  });
+  async function importPdf(file, target) {
+    if (importBusy) return;
+    importBusy = true;
+    let msg = null, ok = false;
+    try {
+      toast('פותח את הקובץ…');
+      const pdfjs = await loadPdfjs();
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let doc;
+      try { doc = await pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false }).promise; } catch (err) {
+        msg = err && err.name === 'PasswordException' ? 'הקובץ מוגן בסיסמה, ואי אפשר לפתוח אותו כאן.' : 'לא הצלחתי לפתוח את הקובץ.\nייתכן שהוא פגום, או שהוא לא PDF.';
+        throw err;
+      }
+      const n = doc.numPages, fileId = uid(), pages = [];
+      for (let i = 1; i <= n; i++) {
+        const p = await doc.getPage(i);
+        const v = p.getViewport({ scale: 1 });
+        pages.push({ id: uid(), type: 'blank', bg: { file: fileId, n: i, h: Math.round(PAGE_W * v.height / v.width * 100) / 100 } });
+        p.cleanup();
+        if (n > 20 && i % 10 === 0) toast('מייבא… ' + i + '/' + n);
+      }
+      await persist(() => DB.putFile({ id: fileId, name: String(file.name || ''), blob: new Blob([bytes], { type: 'application/pdf' }) }));
+      pdfDocs.set(fileId, Promise.resolve(doc));
+      flushLive(); clearSelection();
+      if (target === 'append' && curNb) {
+        curNb.pages.push(...pages);
+        await persist(() => DB.putRec('notebooks', curNb));
+        await openPage(curNb.id, pages[0].id);
+      } else {
+        const now = Date.now(), name = String(file.name || '').replace(/\.pdf$/i, '').trim().slice(0, 80) || 'PDF';
+        const nb = { id: uid(), name, parent: !library.hidden && libView === 'folder' ? libFolder : '', created: now, updated: now, pages, last: pages[0].id };
+        lib.notebooks.set(nb.id, nb);
+        await persist(() => DB.putRec('notebooks', nb));
+        closeLibrary();
+        await openPage(nb.id, pages[0].id);
+      }
+      fitWidth(); render();
+      toast(n === 1 ? 'נוסף עמוד אחד מה-PDF' : 'נוספו ' + n + ' עמודים מה-PDF');
+      ok = true;
+    } catch (err) { console.error(err); } finally { importBusy = false; }
+    if (!ok && await dialog({ title: msg || 'הייבוא לא הצליח.\nשום דבר לא השתנה.', ok: 'נסה שוב' })) pickPdf(target);
+  }
+
+  // ===================== הוספת תמונה (לוח, גלריה, מצלמה) =====================
+  const IMG_MAX = 2048; // צד ארוך מקסימלי; תמונה גדולה יותר מוקטנת (חוסך מקום וזיכרון)
+  async function prepImageBlob(blob) {
+    const bmp = await createImageBitmap(blob);
+    let w = bmp.width, h = bmp.height, out = blob;
+    if (!w || !h) throw new Error('empty');
+    const png = blob.type === 'image/png';
+    if (Math.max(w, h) > IMG_MAX || !/^image\/(png|jpeg|webp)$/.test(blob.type) || blob.size > 4e6) {
+      const k = Math.min(1, IMG_MAX / Math.max(w, h));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+      const g = c.getContext('2d');
+      if (!png) { g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); }
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(bmp, 0, 0, c.width, c.height);
+      out = await new Promise((res) => c.toBlob(res, png ? 'image/png' : 'image/jpeg', 0.9));
+      w = c.width; h = c.height;
+    }
+    if (bmp.close) bmp.close();
+    if (!out) throw new Error('encode');
+    return { blob: out, w, h };
+  }
+  async function insertImage(blob, retry) {
+    if (!curPage || loading) return;
+    if (viewOnly) setViewOnly(false);
+    let r;
+    try { r = await prepImageBlob(blob); } catch (err) {
+      console.error(err);
+      if (await dialog({ title: 'לא הצלחתי לפתוח את התמונה.', ok: retry ? 'נסה שוב' : 'סגירה', noCancel: !retry }) && retry) retry();
+      return;
+    }
+    flushLive(); clearSelection();
+    // במרכז מה שרואים על המסך, בגודל שנראה טבעי, ולא גדול מהמסך
+    const vx0 = Math.max(0, -view.ox / view.s), vy0 = Math.max(0, -view.oy / view.s);
+    const vx1 = Math.min(PAGE_W, (W - view.ox) / view.s), vy1 = Math.min(PAGE_H, (H - view.oy) / view.s);
+    const vw = Math.max(100, vx1 - vx0), vh = Math.max(100, vy1 - vy0);
+    let w = r.w / dpr / view.s, h = r.h / dpr / view.s;
+    const k = Math.min(1, vw * 0.8 / w, vh * 0.8 / h, PAGE_W * 0.9 / w);
+    w *= k; h *= k;
+    const x = Math.max(0, Math.min(PAGE_W - w, (vx0 + vx1) / 2 - w / 2));
+    const y = Math.max(0, Math.min(PAGE_H - h, (vy0 + vy1) / 2 - h / 2));
+    const im = makeImg({ id: newId(), page: curPage, blob: r.blob, mime: r.blob.type, x, y, w, h, rot: 0 });
+    commit({ add: [im], remove: [] });
+    sel = makeSel([im]);
+    updateUI();
+    render();
+    toast('גוררים להזזה, פינה לשינוי גודל. חיתוך וסיבוב בסרגל.');
+  }
+  const galFile = $('#galFile'), camFile = $('#camFile');
+  for (const inp of [galFile, camFile]) {
+    inp.addEventListener('change', () => {
+      const f = inp.files[0];
+      inp.value = '';
+      if (f) insertImage(f, () => inp.click());
+    });
+  }
+  async function pasteImage() {
+    let msg = 'לא הצלחתי לקרוא את הלוח.\nאם הדפדפן שואל, צריך לאשר גישה ללוח.';
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        for (const it of await navigator.clipboard.read()) {
+          const t = it.types.find((x) => x.startsWith('image/'));
+          if (t) { insertImage(await it.getType(t), pasteImage); return; }
+        }
+        msg = 'אין תמונה בלוח.\nמעתיקים תמונה (למשל צילום מסך: שיתוף ← העתקה), ואז מנסים שוב.';
+      }
+    } catch (err) { console.error(err); }
+    if (await dialog({ title: msg, ok: 'נסה שוב' })) pasteImage();
+  }
+  document.addEventListener('paste', (e) => {
+    if (!library.hidden || !dlg.hidden || !e.clipboardData) return;
+    const f = [...e.clipboardData.files].find((x) => x.type.startsWith('image/'));
+    if (f) { e.preventDefault(); insertImage(f); }
+  });
+
+  // ===================== ייצוא PDF =====================
+  // כתב וקווי הדף כווקטורים (חדים בכל זום), עמוד PDF מיובא נשאר המקורי, ותמונות כמו שהן במחברת
+  let pdfLibP = null;
+  function loadPdfLib() {
+    if (window.PDFLib) return Promise.resolve(window.PDFLib);
+    if (!pdfLibP) {
+      pdfLibP = new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = 'lib/pdf-lib.min.js';
+        s.onload = () => (window.PDFLib ? res(window.PDFLib) : rej(new Error('pdflib')));
+        s.onerror = () => rej(new Error('pdflib'));
+        document.head.appendChild(s);
+      });
+      pdfLibP.catch(() => { pdfLibP = null; });
+    }
+    return pdfLibP;
+  }
+  const f2 = (v) => Math.round(v * 100) / 100;
+  function pdfRgb(P, c) { const [r, g, b] = hexRgb(c); return P.rgb(r / 255, g / 255, b / 255); }
+  // "קנבס" שמתרגם את ציור קווי הדף (drawPaper) לפקודות PDF
+  function pdfPaperCtx(P, page, k, Hpt) {
+    let d = '', fill = '#ffffff', strokeC = '#000000', lw = 1;
+    return {
+      globalAlpha: 1,
+      set fillStyle(v) { fill = v; },
+      set strokeStyle(v) { strokeC = v; },
+      set lineWidth(v) { lw = v; },
+      fillRect(x, y, w, h) { page.drawRectangle({ x: x * k, y: Hpt - (y + h) * k, width: w * k, height: h * k, color: pdfRgb(P, fill) }); },
+      beginPath() { d = ''; },
+      moveTo(x, y) { d += 'M ' + f2(x) + ' ' + f2(y) + ' '; },
+      lineTo(x, y) { d += 'L ' + f2(x) + ' ' + f2(y) + ' '; },
+      stroke() { if (d) page.drawSvgPath(d, { x: 0, y: Hpt, scale: k, borderColor: pdfRgb(P, strokeC), borderWidth: lw }); },
+    };
+  }
+  // נקודות לאורך הקו המוחלק [x, y, רדיוס, ...], באותה עקומה כמו על המסך
+  function strokeSamples(st) {
+    const pts = st.pts, n = st.n, out = [], ar = st.arc;
+    sp(pts, n, 0, B);
+    out.push(B[0], B[1], radiusAt(st, B[2], 0));
+    for (let i = 0; i < n - 1; i++) {
+      sp(pts, n, i - 1, A); sp(pts, n, i, B); sp(pts, n, i + 1, C); sp(pts, n, i + 2, D);
+      const steps = Math.max(1, Math.ceil(Math.hypot(C[0] - B[0], C[1] - B[1]) / 3));
+      const s0 = ar ? ar[Math.min(i, n - 1)] : 0, s1 = ar ? ar[Math.min(i + 1, n - 1)] : 0;
+      for (let q = 1; q <= steps; q++) {
+        const t = q / steps, t2 = t * t, t3 = t2 * t;
+        const x = 0.5 * (2 * B[0] + (C[0] - A[0]) * t + (2 * A[0] - 5 * B[0] + 4 * C[0] - D[0]) * t2 + (3 * B[0] - A[0] - 3 * C[0] + D[0]) * t3);
+        const y = 0.5 * (2 * B[1] + (C[1] - A[1]) * t + (2 * A[1] - 5 * B[1] + 4 * C[1] - D[1]) * t2 + (3 * B[1] - A[1] - 3 * C[1] + D[1]) * t3);
+        out.push(x, y, radiusAt(st, B[2] + (C[2] - B[2]) * t, s0 + (s1 - s0) * t));
+      }
+    }
+    return out;
+  }
+  function pdfStroke(P, page, st, k, Hpt) {
+    const color = pdfRgb(P, st.color), S = strokeSamples(st), m = S.length / 3;
+    const opacity = st.type === 'hl' ? HL_ALPHA : undefined;
+    if (m === 1) { page.drawCircle({ x: S[0] * k, y: Hpt - S[1] * k, size: Math.max(0.2, S[2]) * k, color, opacity }); return; }
+    const opt = (w) => ({ x: 0, y: Hpt, scale: k, borderColor: color, borderWidth: w, borderOpacity: opacity, borderLineCap: P.LineCapStyle.Round });
+    page.pushOperators(P.pushGraphicsState(), P.setLineJoin(P.LineJoinStyle.Round));
+    if (st.type === 'felt' || st.type === 'hl') { // עובי אחיד: מסלול אחד (גם כדי שמדגש שקוף לא יכהה בחפיפות)
+      let d = 'M ' + f2(S[0]) + ' ' + f2(S[1]);
+      for (let i = 1; i < m; i++) d += ' L ' + f2(S[i * 3]) + ' ' + f2(S[i * 3 + 1]);
+      page.drawSvgPath(d, opt(Math.max(0.2, S[2] * 2)));
+    } else { // עובי משתנה: רצפים של מקטעים באותו עובי (בקפיצות של 0.25), עם קצוות עגולים
+      let d = '', q = -1;
+      for (let i = 0; i < m - 1; i++) {
+        const w = Math.max(0.25, Math.round((S[i * 3 + 2] + S[i * 3 + 5]) / 0.25) * 0.25);
+        if (w !== q) { if (d) page.drawSvgPath(d, opt(q)); q = w; d = 'M ' + f2(S[i * 3]) + ' ' + f2(S[i * 3 + 1]); }
+        d += ' L ' + f2(S[i * 3 + 3]) + ' ' + f2(S[i * 3 + 4]);
+      }
+      if (d) page.drawSvgPath(d, opt(q));
+    }
+    page.pushOperators(P.popGraphicsState());
+  }
+  async function pdfImage(P, doc, page, im, k, Hpt) {
+    const c = im.crop, plain = !im.rot && c[0] === 0 && c[1] === 0 && c[2] === 1 && c[3] === 1;
+    const png = im.mime === 'image/png';
+    let bytes;
+    if (plain && (png || im.mime === 'image/jpeg')) bytes = new Uint8Array(await im.blob.arrayBuffer());
+    else { // חיתוך / סיבוב / סוג אחר: מכינים את התמונה כמו שהיא מוצגת
+      const b = await decodeImg(im);
+      if (!b) return;
+      const sw = Math.max(1, Math.round((c[2] - c[0]) * b.width)), sh = Math.max(1, Math.round((c[3] - c[1]) * b.height));
+      const odd = im.rot % 180 !== 0, cv = document.createElement('canvas');
+      cv.width = odd ? sh : sw; cv.height = odd ? sw : sh;
+      const g = cv.getContext('2d');
+      if (!png) { g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); }
+      g.translate(cv.width / 2, cv.height / 2);
+      g.rotate(im.rot * Math.PI / 180);
+      g.drawImage(b, c[0] * b.width, c[1] * b.height, (c[2] - c[0]) * b.width, (c[3] - c[1]) * b.height, -sw / 2, -sh / 2, sw, sh);
+      const blob = await new Promise((res) => cv.toBlob(res, png ? 'image/png' : 'image/jpeg', 0.92));
+      if (!blob) throw new Error('encode');
+      bytes = new Uint8Array(await blob.arrayBuffer());
+    }
+    const emb = png ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+    page.drawImage(emb, { x: im.x * k, y: Hpt - (im.y + im.h) * k, width: im.w * k, height: im.h * k });
+  }
+  // עמוד מהקובץ המקורי (וקטורי). אם אי אפשר (למשל קובץ מוצפן): כתמונה ברזולוציה גבוהה
+  async function pdfSrcPage(P, srcDocs, bg) {
+    let src = srcDocs.get(bg.file);
+    if (src === undefined) {
+      try { src = await P.PDFDocument.load(await fileBytes(bg.file)); } catch (e) { console.error(e); src = null; }
+      srcDocs.set(bg.file, src);
+    }
+    if (!src || bg.n > src.getPageCount()) return null;
+    return src.getPage(bg.n - 1);
+  }
+  async function pdfRasterBg(P, doc, page, pg, k, Hpt) {
+    const pdoc = await getPdf(pg.bg.file), p = await pdoc.getPage(pg.bg.n);
+    const v1 = p.getViewport({ scale: 1 }), vp = p.getViewport({ scale: 2000 / v1.width });
+    const c = document.createElement('canvas');
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    await p.render({ canvasContext: g, viewport: vp }).promise;
+    const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.9));
+    c.width = 0;
+    if (!blob) throw new Error('encode');
+    const emb = await doc.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+    page.drawImage(emb, { x: 0, y: Hpt - pg.bg.h * k, width: PAGE_W * k, height: pg.bg.h * k });
+  }
+  let exportBusy = false;
+  async function exportPdf(pages, name) {
+    if (exportBusy || !pages.length) return;
+    exportBusy = true;
+    let failed = false;
+    try {
+      toast('מכין PDF…');
+      flushLive();
+      await saveChain;
+      const P = await loadPdfLib();
+      const doc = await P.PDFDocument.create();
+      const srcDocs = new Map();
+      let i = 0;
+      for (const pg of pages) {
+        if (pages.length > 3) toast('מכין PDF… ' + (++i) + '/' + pages.length);
+        const data = await pageData(pg.id), H = pg.id === curPage ? PAGE_H : pageH(pg);
+        let k = 595.28 / PAGE_W, emb = null, rot = 0; // רוחב A4
+        if (pg.bg) {
+          const sp = await pdfSrcPage(P, srcDocs, pg.bg);
+          if (sp) {
+            try {
+              const cb = sp.getCropBox();
+              emb = await doc.embedPage(sp, { left: cb.x, bottom: cb.y, right: cb.x + cb.width, top: cb.y + cb.height });
+              rot = ((sp.getRotation().angle % 360) + 360) % 360;
+              k = (rot % 180 ? emb.height : emb.width) / PAGE_W;
+            } catch (e) { console.error(e); emb = null; }
+          }
+        }
+        const Hpt = H * k, page = doc.addPage([PAGE_W * k, Hpt]);
+        withH(H, () => drawPaper(pdfPaperCtx(P, page, k, Hpt), pg.type, false, 0.8, 0, 0, PAGE_W, H));
+        if (emb) {
+          const w0 = emb.width, h0 = emb.height, base = Hpt - (rot % 180 ? w0 : h0);
+          const o = rot === 90 ? [0, base + w0, -90] : rot === 180 ? [w0, base + h0, 180] : rot === 270 ? [h0, base, 90] : [0, base, 0];
+          page.drawPage(emb, { x: o[0], y: o[1], rotate: P.degrees(o[2]) });
+        } else if (pg.bg) await pdfRasterBg(P, doc, page, pg, k, Hpt);
+        for (const im of data.images) await pdfImage(P, doc, page, im, k, Hpt);
+        for (const st of data.strokes) pdfStroke(P, page, st, k, Hpt);
+      }
+      const bytes = await doc.save();
+      // בדיקה: פותחים את הקובץ שנוצר ומוודאים שכל העמודים שם
+      if ((await P.PDFDocument.load(bytes)).getPageCount() !== pages.length) throw new Error('verify');
+      downloadBlob(new Blob([bytes], { type: 'application/pdf' }), 'machberet-' + safeName(name) + '-' + fileStamp() + '.pdf');
+      toast('ה-PDF נשמר בתיקיית ההורדות ✓');
+    } catch (err) { console.error(err); failed = true; } finally { exportBusy = false; }
+    if (failed && await dialog({ title: 'הייצוא ל-PDF לא הצליח.\nשום דבר לא השתנה.', ok: 'נסה שוב' })) exportPdf(pages, name);
+  }
+  async function exportPdfMenu() {
+    if (!curNb) return;
+    const nb = curNb, pg = curPg();
+    let what = 'all';
+    if (nb.pages.length > 1) {
+      what = await dialog({ title: 'ייצוא ל-PDF', list: [
+        { label: 'העמוד הזה', value: 'page' }, { label: 'כל המחברת (' + nb.pages.length + ' עמודים)', value: 'all' }] });
+      if (!what) return;
+    }
+    exportPdf(what === 'page' && pg ? [pg] : nb.pages.slice(), nb.name + (what === 'page' ? '-עמוד' + (nb.pages.indexOf(pg) + 1) : ''));
   }
 
   // ===================== תפריט "..." =====================
@@ -3290,14 +3986,19 @@
     else if (cmd === 'view') setViewOnly(!viewOnly);
     else if (cmd === 'hidebar') setBarHidden(true);
     else if (cmd === 'backup') exportBackup({ nb: curNb && curNb.id });
+    else if (cmd === 'imgGal') galFile.click();
+    else if (cmd === 'imgCam') camFile.click();
+    else if (cmd === 'imgPaste') pasteImage();
+    else if (cmd === 'pdfAdd') pickPdf('append');
+    else if (cmd === 'pdfExport') exportPdfMenu();
     else if (cmd === 'fast') {
       settings.fastInk = !settings.fastInk;
       saveSettings();
       location.reload(); // הגדרת הקנבס נקבעת רק בטעינה
     } else if (cmd === 'clear') {
       clearSelection();
-      if (!strokes.length || viewOnly || loading) return;
-      if (await dialog({ title: 'לנקות את כל הדף?\nאפשר להחזיר עם "ביטול".', ok: 'ניקוי' })) commit({ add: [], remove: strokes.slice() });
+      if (!(strokes.length || images.length) || viewOnly || loading) return;
+      if (await dialog({ title: 'לנקות את כל הדף?\nאפשר להחזיר עם "ביטול".', ok: 'ניקוי' })) commit({ add: [], remove: strokes.concat(images) });
     }
   });
 
