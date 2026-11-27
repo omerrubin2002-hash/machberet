@@ -36,6 +36,15 @@
     <button id="selCopy" title="העתקת הבחירה" aria-label="העתקת הבחירה">
       <svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg>
     </button>
+    <button id="imgCrop" title="חיתוך התמונה" aria-label="חיתוך התמונה" hidden>
+      <svg viewBox="0 0 24 24"><path d="M7 3v14h14 M3 7h14v14"/></svg>
+    </button>
+    <button id="imgRot" title="סיבוב התמונה" aria-label="סיבוב התמונה" hidden>
+      <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9 M20 4v5h-5"/></svg>
+    </button>
+    <button id="selDel" title="מחיקת הבחירה" aria-label="מחיקת הבחירה">
+      <svg viewBox="0 0 24 24"><path d="M4 7h16 M9 7V5h6v2 M6 7l1 13h10l1-13 M10 11v6 M14 11v6"/></svg>
+    </button>
   </div>
   <div class="sep"></div>
   <div class="group" id="sizes"></div>
@@ -68,6 +77,12 @@
   <button data-cmd="full" id="fullBtn">מסך מלא</button>
   <button data-cmd="view" id="viewBtn">צפייה בלבד</button>
   <button data-cmd="hidebar">הסתרת הסרגל</button>
+  <div class="menu-sep"></div>
+  <button data-cmd="imgGal">הוספת תמונה מהגלריה</button>
+  <button data-cmd="imgCam">צילום תמונה במצלמה</button>
+  <button data-cmd="imgPaste">הדבקת תמונה מהלוח</button>
+  <button data-cmd="pdfAdd">הוספת עמודים מקובץ PDF</button>
+  <button data-cmd="pdfExport">ייצוא ל-PDF</button>
   <div class="menu-sep"></div>
   <button data-cmd="fit">התאמה לרוחב המסך</button>
   <button data-cmd="clear">ניקוי הדף</button>
@@ -174,6 +189,9 @@
 <div id="popMenu" hidden></div>
 <div id="toast" hidden></div>
 <input type="file" id="restoreFile" accept=".json,application/json" hidden>
+<input type="file" id="pdfFile" accept="application/pdf,.pdf" hidden>
+<input type="file" id="galFile" accept="image/*" hidden>
+<input type="file" id="camFile" accept="image/*" capture="environment" hidden>
 <script src="app.js"></script>
 </body>
 </html>
