@@ -103,6 +103,11 @@
       libSort: ['updated', 'name', 'created'].includes(s.libSort) ? s.libSort : 'updated',
       lastBackup: +s.lastBackup || 0,
       continuous: s.continuous === true,
+      drive: (() => { // גיבוי ל-Google Drive
+        const d = s.drive && typeof s.drive === 'object' ? s.drive : {};
+        return { on: d.on === true, email: typeof d.email === 'string' ? d.email : '', folderId: typeof d.folderId === 'string' ? d.folderId : '',
+          lastUp: +d.lastUp || 0, sig: typeof d.sig === 'string' ? d.sig : '' };
+      })(),
     };
   })();
   mctx = settings.fastInk ? mainC.getContext('2d', { desynchronized: true }) : mainC.getContext('2d', { alpha: false });
@@ -1780,7 +1785,7 @@
     } else {
       if (busy() || viewOnly || loading || (gesture && (gesture.moved || gesture.pinched))) return;
       const x = wx(L.cx), y = wy(L.cy), im = imageAt(x, y);
-      if (!im && !clipboard) return;
+      if (!im && (x < 0 || x > PAGE_W || y < 0 || y > PAGE_H)) return; // מחוץ לדף
       gesture = null; tap = null;
       t.ignored = true;
       if (im) { // לחיצה ארוכה על תמונה: בוחרת רק את התמונה (בלי הכתב שעליה), ותפריט
@@ -1788,7 +1793,13 @@
         const items = selMenuItems();
         if (clipboard) items.push(['הדבקה', () => pasteAt(x, y)]);
         showCtx(L.cx, L.cy, items);
-      } else showCtx(L.cx, L.cy, [['הדבקה', () => pasteAt(x, y)]]);
+      } else { // מקום ריק: הדבקה (אם יש משהו מועתק) והוספת תמונה בדיוק כאן
+        const items = clipboard ? [['הדבקה', () => pasteAt(x, y)]] : [];
+        items.push(['תמונה מהגלריה', () => { imgAt = { x, y }; galFile.click(); }],
+          ['מצלמה', () => { imgAt = { x, y }; camFile.click(); }],
+          ['תמונה מהלוח', () => { imgAt = { x, y }; pasteImage(); }]);
+        showCtx(L.cx, L.cy, items);
+      }
     }
   }
   // שינוי סוג העט / הצבע של הכתב שנבחר (תמונות לא משתנות; מדגש נשאר מדגש בשינוי סוג)
@@ -3028,6 +3039,7 @@
     libQuery = ''; libSearch.value = '';
     library.hidden = false;
     renderLibrary();
+    driveOnLibrary();
   }
   function closeLibrary() { library.hidden = true; libToken++; closePopMenu(null); }
   function go(view, folder) {
@@ -3076,6 +3088,14 @@
     if (bs.warn) note.textContent = bs.last ? 'עברו ' + bs.days + ' ימים מהגיבוי האחרון. הקשה כאן לגיבוי.' : 'עוד לא גיבית. הקשה כאן לגיבוי.';
     else note.textContent = bs.last ? 'גובה לאחרונה: ' + stampText(bs.last) : '';
     note.onclick = bs.warn ? () => exportBackup({}) : null;
+    if (settings.drive.on && DRIVE_CLIENT_ID) { // מחובר ל-Drive: מצב הגיבוי שם
+      const bad = drv.state === 'auth' || drv.state === 'retry';
+      if (bad || drv.state === 'up' || drv.state === 'offline' || !bs.warn) {
+        note.className = 'backup-note' + (bad ? ' warn' : '');
+        note.textContent = driveStatusText();
+        note.onclick = bad ? driveTapNote : null;
+      } else note.onclick = () => driveNow();
+    }
   }
   library.querySelectorAll('.nav[data-view]').forEach((b) => b.addEventListener('click', () => go(b.dataset.view)));
 
@@ -3307,8 +3327,31 @@
     const note = document.createElement('div');
     note.className = 'lib-empty';
     note.style.padding = '18px 4px'; note.style.textAlign = 'right'; note.style.fontSize = '14px';
-    note.textContent = 'קובץ הגיבוי נשמר בתיקיית ההורדות של הטאבלט. כדאי להעתיק אותו גם למקום אחר (למשל Google Drive) עד שנחבר גיבוי אוטומטי.';
+    note.textContent = 'קובץ הגיבוי נשמר בתיקיית ההורדות של הטאבלט. לגיבוי אוטומטי: Google Drive למטה.';
     libBody.appendChild(note);
+    secTitle('Google Drive');
+    const d = settings.drive;
+    if (!DRIVE_CLIENT_ID) {
+      card([row('גיבוי ל-Google Drive', 'עוד לא הוגדר באפליקציה', document.createElement('span'))]);
+    } else if (!d.on) {
+      card([
+        row('גיבוי אוטומטי ל-Google Drive', 'הגיבויים נשמרים בתיקייה "' + DRIVE_FOLDER + '". האפליקציה רואה רק את הקבצים שלה.', pill('חיבור', driveConnect)),
+        row('שחזור מגיבוי ב-Drive', 'מוסיף מהגיבוי, לא מוחק את מה שכבר כאן', pill('בחירה', driveRestore)),
+      ]);
+    } else {
+      const st = row('מחובר' + (d.email ? ': ' + d.email : ''), driveStatusText(), pill('גיבוי עכשיו', () => driveNow()));
+      if (drv.state === 'auth' || drv.state === 'retry') { st.querySelector('.sub').style.color = '#c62828'; st.firstChild.onclick = driveTapNote; }
+      card([
+        st,
+        row('שחזור מגיבוי ב-Drive', 'מוסיף מהגיבוי, לא מוחק את מה שכבר כאן', pill('בחירה', driveRestore)),
+        row('ניתוק מ-Google Drive', 'הגיבוי האוטומטי ייפסק', pill('ניתוק', driveDisconnect)),
+      ]);
+      const n2 = document.createElement('div');
+      n2.className = 'lib-empty';
+      n2.style.padding = '18px 4px'; n2.style.textAlign = 'right'; n2.style.fontSize = '14px';
+      n2.textContent = 'גיבוי אוטומטי כשיש שינויים (עד פעם ב-10 דקות, רק כשלא כותבים), ובכל פתיחה של הספרייה. בלי אינטרנט הגיבוי נשמר בטאבלט ועולה כשהאינטרנט חוזר. ב-Drive נשמרים 15 הגיבויים האחרונים.';
+      libBody.appendChild(n2);
+    }
   }
 
   // ----- פעולות -----
@@ -3445,7 +3488,7 @@
     const used = new Set();
     for (const nb of lib.notebooks.values()) for (const p of nb.pages) if (p.bg) used.add(p.bg.file);
     persist(async () => {
-      const ids = (await DB.fileIds()).filter((id) => !used.has(id));
+      const ids = (await DB.fileIds()).filter((id) => !used.has(id) && !String(id).startsWith('outbox:'));
       if (ids.length) await DB.delFiles(ids);
       for (const id of ids) pdfDocs.delete(id);
     });
@@ -3525,6 +3568,24 @@
     let failed = false;
     try {
       toast('מכין גיבוי…');
+      const { blob, name } = await buildBackup(scope);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'machberet-' + safeName(name) + '-' + fileStamp() + '.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      if (!scope.nb && !scope.folder) { settings.lastBackup = Date.now(); saveSettings(); }
+      toast('הגיבוי נבדק ונשמר בתיקיית ההורדות ✓');
+      if (!library.hidden) renderLibrary();
+    } catch (err) {
+      console.error(err);
+      failed = true;
+    } finally { backupBusy = false; }
+    if (failed && await dialog({ title: 'הגיבוי לא הצליח.\nשום דבר לא נמחק או השתנה.', ok: 'נסה שוב' })) exportBackup(scope);
+  }
+  // בונה קובץ גיבוי ובודק אותו (קורא אותו בחזרה). זורק שגיאה אם משהו לא שלם.
+  async function buildBackup(scope) {
+    {
       flushLive();
       await saveCurThumb();
       await saveChain;
@@ -3580,19 +3641,8 @@
       if (!back || back.nbs.length !== nbs.length || back.folders.length !== folders.length || back.recs.length !== count ||
         back.imgs.length !== icount || back.files.length !== fcount ||
         back.nbs.some((n, i) => n.name !== nbs[i].name || n.pages.length !== nbs[i].pages.length)) throw new Error('verify');
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'machberet-' + safeName(name) + '-' + fileStamp() + '.json';
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-      if (!scope.nb && !scope.folder) { settings.lastBackup = Date.now(); saveSettings(); }
-      toast('הגיבוי נבדק ונשמר בתיקיית ההורדות ✓');
-      if (!library.hidden) renderLibrary();
-    } catch (err) {
-      console.error(err);
-      failed = true;
-    } finally { backupBusy = false; }
-    if (failed && await dialog({ title: 'הגיבוי לא הצליח.\nשום דבר לא נמחק או השתנה.', ok: 'נסה שוב' })) exportBackup(scope);
+      return { blob, name };
+    }
   }
 
   // ----- שחזור: קודם בודקים את כל הקובץ, ורק אז כותבים (בפעולה אחת) -----
@@ -3682,10 +3732,16 @@
     const f = restoreFile.files[0];
     restoreFile.value = '';
     if (!f) return;
+    let text = null;
+    try { text = await f.text(); } catch (e) { text = null; }
+    restoreFromText(text, 'בחירת קובץ אחר', () => restoreFile.click());
+  });
+  // שחזור מתוכן של קובץ גיבוי (מהמכשיר או מ-Drive): קודם בדיקה מלאה, ורק אז כתיבה
+  async function restoreFromText(text, againLabel, again) {
     let v = null;
-    try { v = validateBackup(JSON.parse(await f.text())); } catch (e) { v = null; }
+    try { v = validateBackup(JSON.parse(text)); } catch (e) { v = null; }
     if (!v) {
-      if (await dialog({ title: 'הקובץ הזה פגום, לא שלם, או שהוא לא גיבוי של המחברת.\nלא שיניתי כלום.', ok: 'בחירת קובץ אחר' })) restoreFile.click();
+      if (await dialog({ title: 'הקובץ הזה פגום, לא שלם, או שהוא לא גיבוי של המחברת.\nלא שיניתי כלום.', ok: againLabel })) again();
       return;
     }
     const n = v.nbs.length;
@@ -3698,7 +3754,7 @@
     }
     if (!library.hidden) renderLibrary();
     toast('השחזור הושלם ✓');
-  });
+  }
   async function applyRestore(v) {
     flushLive(); clearSelection();
     await saveCurThumb();
@@ -3725,6 +3781,318 @@
     for (const p of v.pages) { setThumbUrl(p, null); histories.delete(p); }
     if (curNb && v.pages.includes(curPage)) await openPage(curNb.id, curPage);
     else updatePageUI();
+  }
+
+  // ===================== גיבוי ל-Google Drive =====================
+  // הגיבוי נבנה ונבדק על המכשיר, נשמר ב"תיבת יציאה" (IndexedDB), ורק אז עולה ל-Drive.
+  // בלי אינטרנט הוא מחכה בתיבה ועולה כשהאינטרנט חוזר. אחרי העלאה בודקים שהקובץ ב-Drive זהה (גודל + SHA-256).
+  // הרשאה: drive.file = האפליקציה רואה רק קבצים שהיא עצמה יצרה.
+  const DRIVE_CLIENT_ID = '';
+  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+  const DRIVE_FOLDER = 'המחברת שלי - גיבויים';
+  const DRIVE_KEEP = 15;               // כמה גיבויים לשמור ב-Drive (הישנים יותר עוברים לאשפה של Drive)
+  const DRIVE_EVERY = 10 * 60e3;       // גיבוי אוטומטי לכל היותר פעם ב-10 דקות, ורק כשהיו שינויים
+  const OUTBOX = 'outbox:drive';
+  const GAPI = 'https://www.googleapis.com/drive/v3/';
+  const drv = { token: '', exp: 0, gis: null, busy: false, retry: 0, tries: 0, state: '', lastQ: 0 };
+  try { const t = JSON.parse(localStorage.getItem('machberet.drivetok') || '{}'); if (t.exp > Date.now()) { drv.token = t.token; drv.exp = t.exp; } } catch (e) { /* ignore */ }
+  let lastInput = 0;
+  window.addEventListener('pointerdown', () => { lastInput = Date.now(); }, true);
+
+  function setToken(token, sec) {
+    drv.token = token; drv.exp = Date.now() + (+sec || 3600) * 1000;
+    try { localStorage.setItem('machberet.drivetok', JSON.stringify({ token, exp: drv.exp })); } catch (e) { /* ignore */ }
+  }
+  function dropToken() { drv.token = ''; drv.exp = 0; try { localStorage.removeItem('machberet.drivetok'); } catch (e) { /* ignore */ } }
+  const tokenOk = () => drv.token && drv.exp - 120e3 > Date.now();
+  const needAuth = () => Object.assign(new Error('auth'), { auth: true });
+
+  function loadGis() {
+    if (window.google && google.accounts && google.accounts.oauth2) return Promise.resolve();
+    if (!drv.gisP) {
+      drv.gisP = new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = 'https://accounts.google.com/gsi/client';
+        s.onload = () => res(); s.onerror = () => { drv.gisP = null; rej(new Error('gis')); };
+        document.head.appendChild(s);
+      });
+    }
+    return drv.gisP;
+  }
+  // חלון ההתחברות של Google. חייב לבוא מהקשה של המשתמש (אחרת הדפדפן חוסם אותו).
+  // אם החלון לא נפתח (קורה באפליקציה מותקנת), עוברים לדף ההתחברות וחוזרים לאפליקציה.
+  // after = מה לעשות אחרי חזרה מדף ההתחברות (ואם אין: לא עוברים דף, רק חלון)
+  async function signIn(after) {
+    if (!window.google || !google.accounts) {
+      try { await loadGis(); } catch (e) { if (after && navigator.onLine) signInRedirect(after); throw needAuth(); }
+    }
+    return new Promise((res, rej) => {
+      if (!drv.gis) drv.gis = google.accounts.oauth2.initTokenClient({ client_id: DRIVE_CLIENT_ID, scope: DRIVE_SCOPE, callback: () => {} });
+      drv.gis.callback = (r) => {
+        if (r && r.access_token && google.accounts.oauth2.hasGrantedAllScopes(r, DRIVE_SCOPE)) { setToken(r.access_token, r.expires_in); res(); }
+        else rej(needAuth());
+      };
+      drv.gis.error_callback = (e) => {
+        if (e && e.type === 'popup_failed_to_open' && after) { signInRedirect(after); return; } // הדף עובר; לא מציגים שגיאה
+        rej(needAuth());
+      };
+      drv.gis.requestAccessToken({ prompt: settings.drive.email ? '' : 'select_account', login_hint: settings.drive.email || undefined });
+    });
+  }
+  const appUrl = () => location.href.split(/[?#]/)[0].replace(/index\.html$/, '');
+  function signInRedirect(after) {
+    flushLive();
+    try { sessionStorage.setItem('machberet.driveAfter', after || 'flush'); } catch (e) { /* ignore */ }
+    const q = new URLSearchParams({ client_id: DRIVE_CLIENT_ID, redirect_uri: appUrl(), response_type: 'token', scope: DRIVE_SCOPE, include_granted_scopes: 'true' });
+    if (settings.drive.email) q.set('login_hint', settings.drive.email); else q.set('prompt', 'select_account');
+    saveChain.then(() => { location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + q; });
+  }
+  // חזרה מדף ההתחברות: הטוקן נמצא אחרי # בכתובת
+  function readRedirectToken() {
+    if (!/(access_token|error)=/.test(location.hash)) return '';
+    const h = new URLSearchParams(location.hash.slice(1));
+    history.replaceState(null, '', appUrl());
+    let after = '';
+    try { after = sessionStorage.getItem('machberet.driveAfter') || ''; sessionStorage.removeItem('machberet.driveAfter'); } catch (e) { /* ignore */ }
+    if (h.get('access_token') && (h.get('scope') || '').includes(DRIVE_SCOPE)) { setToken(h.get('access_token'), h.get('expires_in')); return after || 'flush'; }
+    return after ? 'failed' : '';
+  }
+  // after: ריק = בלי חלון התחברות (רק טוקן שכבר יש); אחרת חלון, ואם צריך מעבר לדף ההתחברות
+  async function getToken(after) {
+    if (tokenOk()) return drv.token;
+    if (!after) throw needAuth();
+    await signIn(after);
+    return drv.token;
+  }
+
+  async function gfetch(url, opt) {
+    opt = opt || {};
+    const r = await fetch(url, Object.assign({}, opt, { headers: Object.assign({ Authorization: 'Bearer ' + drv.token }, opt.headers || {}) }));
+    if (r.status === 401) { dropToken(); throw needAuth(); }
+    if (!r.ok) throw Object.assign(new Error('drive ' + r.status), { status: r.status });
+    return r;
+  }
+  const gjson = async (url, opt) => (await gfetch(url, opt)).json();
+  const qs = (o) => new URLSearchParams(o).toString();
+  const qstr = (s) => "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+
+  async function driveFolder() {
+    const d = settings.drive;
+    if (d.folderId) {
+      try { const f = await gjson(GAPI + 'files/' + d.folderId + '?fields=id,trashed'); if (!f.trashed) return f.id; } catch (e) { if (e.auth) throw e; }
+    }
+    const found = await gjson(GAPI + 'files?' + qs({ q: "mimeType='application/vnd.google-apps.folder' and trashed=false and name=" + qstr(DRIVE_FOLDER), fields: 'files(id)', spaces: 'drive' }));
+    let id = found.files && found.files[0] && found.files[0].id;
+    if (!id) {
+      id = (await gjson(GAPI + 'files?fields=id', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: DRIVE_FOLDER, mimeType: 'application/vnd.google-apps.folder' }) })).id;
+    }
+    d.folderId = id; saveSettings();
+    return id;
+  }
+  async function sha256Hex(blob) {
+    const h = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+    return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  async function driveUpload(blob, name) {
+    const folder = await driveFolder();
+    // העלאה "ניתנת לחידוש": מתאימה גם לקבצים גדולים (עם PDF ותמונות)
+    const start = await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+      method: 'POST', headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': 'application/json' },
+      body: JSON.stringify({ name, parents: [folder], mimeType: 'application/json' }),
+    });
+    const loc = start.headers.get('Location');
+    if (!loc) throw new Error('no upload url');
+    const up = await (await gfetch(loc, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: blob })).json();
+    // בדיקה: מה שנשמר ב-Drive זהה למה ששלחנו
+    const meta = await gjson(GAPI + 'files/' + up.id + '?fields=id,size,sha256Checksum');
+    const ok = +meta.size === blob.size && (!meta.sha256Checksum || meta.sha256Checksum === await sha256Hex(blob));
+    if (!ok) {
+      gfetch(GAPI + 'files/' + up.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{"trashed":true}' }).catch(() => {});
+      throw new Error('verify');
+    }
+    // הגיבויים הישנים (מעבר ל-15 האחרונים) עוברים לאשפה של Drive (אפשר לשחזר משם 30 יום)
+    try {
+      const list = await gjson(GAPI + 'files?' + qs({ q: qstr(folder) + ' in parents and trashed=false', orderBy: 'createdTime desc', fields: 'files(id,name)', pageSize: '100' }));
+      for (const f of (list.files || []).filter((x) => x.name.startsWith('machberet-')).slice(DRIVE_KEEP)) {
+        await gfetch(GAPI + 'files/' + f.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{"trashed":true}' });
+      }
+    } catch (e) { console.error(e); } // ניקוי שנכשל לא פוגע בגיבוי
+  }
+
+  // "חתימה" של הספרייה: אם לא השתנתה מאז הגיבוי האחרון, אין צורך בגיבוי חדש
+  function libSig() {
+    let m = 0, p = 0;
+    for (const n of lib.notebooks.values()) { m = Math.max(m, n.updated || 0, n.trashed || 0); p += n.pages.length; }
+    for (const f of lib.folders.values()) m = Math.max(m, f.trashed || 0, f.created || 0);
+    return [lib.notebooks.size, lib.folders.size, p, m].join(':');
+  }
+  // מכין גיבוי של הכול ושם אותו בתיבת היציאה (מחליף גיבוי קודם שעוד לא עלה)
+  async function queueDrive() {
+    const sig = libSig();
+    const { blob } = await buildBackup({});
+    const created = Date.now();
+    await persist(() => DB.putFile({ id: OUTBOX, name: 'machberet-backup-' + fileStamp() + '.json', blob, created, sig }));
+    drv.lastQ = created;
+  }
+  function scheduleRetry() {
+    clearTimeout(drv.retry);
+    const wait = Math.min(15 * 60e3, 30e3 * Math.pow(2, Math.min(drv.tries, 5)));
+    drv.retry = setTimeout(() => driveFlush(false), wait);
+  }
+  // מעלה את מה שבתיבת היציאה (בלי חלון התחברות; אם אין טוקן בתוקף, מחכה להקשה)
+  async function driveFlush() {
+    if (!settings.drive.on || !DRIVE_CLIENT_ID || drv.busy) return false;
+    drv.busy = true;
+    let done = false;
+    try {
+      const rec = await DB.getFile(OUTBOX);
+      if (!rec) { drv.state = ''; return true; }
+      if (!navigator.onLine) { drv.state = 'offline'; return false; }
+      drv.state = 'up';
+      refreshDriveUI();
+      await getToken('');
+      await driveUpload(rec.blob, rec.name);
+      const now = await DB.getFile(OUTBOX); // אם בינתיים נוסף גיבוי חדש יותר, הוא נשאר בתיבה
+      if (now && now.created === rec.created) await persist(() => DB.delFiles([OUTBOX]));
+      const d = settings.drive;
+      d.lastUp = rec.created; d.sig = rec.sig || d.sig;
+      settings.lastBackup = Math.max(settings.lastBackup || 0, rec.created);
+      saveSettings();
+      drv.tries = 0; drv.state = now && now.created !== rec.created ? 'wait' : 'ok';
+      done = true;
+      if (drv.state === 'wait') setTimeout(driveFlush, 1000);
+    } catch (err) {
+      console.error(err);
+      if (err.auth) drv.state = 'auth'; // צריך להתחבר שוב (מהקשה)
+      else { drv.state = navigator.onLine ? 'retry' : 'offline'; drv.tries++; if (navigator.onLine) scheduleRetry(); }
+    } finally { drv.busy = false; refreshDriveUI(); }
+    return done;
+  }
+  // גיבוי אוטומטי: רק כשהיו שינויים, לא יותר מפעם ב-10 דקות, ורק כשלא כותבים (20 שניות בלי מגע)
+  // soon = פתיחת הספרייה (מספיקה דקה מהגיבוי הקודם)
+  async function driveAuto(soon) {
+    if (!settings.drive.on || !DRIVE_CLIENT_ID || drv.busy || backupBusy) return;
+    try {
+      const pending = await DB.getFile(OUTBOX);
+      if (!pending && libSig() !== settings.drive.sig && Date.now() - drv.lastQ > (soon ? 60e3 : DRIVE_EVERY)) {
+        backupBusy = true;
+        try { await queueDrive(); } finally { backupBusy = false; }
+      }
+    } catch (err) { console.error(err); return; }
+    driveFlush();
+  }
+  setInterval(() => {
+    if (document.hidden || Date.now() - lastInput < 20e3) return;
+    driveAuto(false);
+  }, 60e3);
+  // פתיחת הספרייה (הקשה): אם הטוקן פג ויש מה להעלות, חלון ההתחברות נפתח ונסגר לבד
+  function driveOnLibrary() {
+    if (!settings.drive.on || !DRIVE_CLIENT_ID || !navigator.onLine) return;
+    if (!window.google) loadGis().catch(() => {}); // טוען מראש, כדי שחלון ההתחברות ייפתח מיד בהקשה הבאה
+    const want = drv.state === 'auth' || drv.state === 'retry' || libSig() !== settings.drive.sig;
+    if (want && !tokenOk() && window.google && google.accounts) signIn('').then(() => driveAuto(true), () => { drv.state = 'auth'; refreshDriveUI(); });
+    else driveAuto(true);
+  }
+  // הקשה על הודעת הגיבוי
+  async function driveTapNote() {
+    if (!navigator.onLine) { info('אין אינטרנט כרגע. הגיבוי שמור בטאבלט ויעלה לבד כשיהיה אינטרנט.'); return; }
+    try { await getToken('flush'); } catch (e) { drv.state = 'auth'; refreshDriveUI(); return; }
+    drv.tries = 0;
+    if (await driveFlush()) toast('הגיבוי נבדק ונשמר ב-Google Drive ✓');
+  }
+  window.addEventListener('online', () => { drv.tries = 0; driveFlush(); });
+  window.addEventListener('offline', () => { if (settings.drive.on) { drv.state = 'offline'; refreshDriveUI(); } });
+
+  function refreshDriveUI() { if (!library.hidden) { renderSide(); if (libView === 'settings' && !libQuery) renderLibrary(); } }
+  function driveStatusText() {
+    const d = settings.drive;
+    if (drv.state === 'up') return 'מעלה גיבוי ל-Drive…';
+    if (drv.state === 'offline') return 'אין אינטרנט. הגיבוי שמור בטאבלט ויעלה כשיהיה אינטרנט.';
+    if (drv.state === 'auth') return 'צריך להתחבר שוב ל-Google כדי להעלות. הקשה כאן.';
+    if (drv.state === 'retry') return 'ההעלאה ל-Drive לא הצליחה. אנסה שוב בעוד כמה דקות (או הקשה כאן).';
+    return d.lastUp ? 'גובה ל-Drive: ' + stampText(d.lastUp) : 'עוד לא גובה ל-Drive';
+  }
+  const driveError = (err) => (err && err.auth ? 'לא הצלחתי להתחבר לחשבון Google.' : !navigator.onLine ? 'אין חיבור לאינטרנט.' : 'לא הצלחתי לדבר עם Google Drive.');
+
+  async function driveConnect() {
+    if (!navigator.onLine) { info('צריך אינטרנט כדי להתחבר ל-Google Drive.'); return; }
+    dropToken();
+    settings.drive.email = '';
+    try { await getToken('connect'); } catch (err) {
+      console.error(err);
+      if (await dialog({ title: driveError(err) + '\nשום דבר לא השתנה.', ok: 'נסה שוב' })) driveConnect();
+      return;
+    }
+    finishConnect();
+  }
+  async function finishConnect() { // אחרי התחברות (מחלון, או חזרה מדף ההתחברות)
+    try {
+      try { settings.drive.email = (await gjson(GAPI + 'about?fields=user(emailAddress)')).user.emailAddress || ''; } catch (e) { if (e.auth) throw e; }
+    } catch (err) {
+      console.error(err);
+      if (await dialog({ title: driveError(err) + '\nשום דבר לא השתנה.', ok: 'נסה שוב' })) driveConnect();
+      return;
+    }
+    Object.assign(settings.drive, { on: true, folderId: '', sig: '' });
+    saveSettings();
+    toast('מחובר ל-Google Drive. מגבה…');
+    refreshDriveUI();
+    await driveNow(true);
+  }
+  // "גיבוי עכשיו": קודם התחברות (כל עוד ההקשה "טרייה"), ואז בניית הגיבוי והעלאה
+  async function driveNow(hasToken) {
+    if (backupBusy) return;
+    if (!hasToken && navigator.onLine && !tokenOk()) { try { await getToken('now'); } catch (e) { drv.state = 'auth'; } }
+    backupBusy = true;
+    try { await queueDrive(); } catch (err) {
+      console.error(err);
+      backupBusy = false;
+      if (await dialog({ title: 'הגיבוי לא הצליח.\nשום דבר לא נמחק או השתנה.', ok: 'נסה שוב' })) driveNow();
+      return;
+    }
+    backupBusy = false;
+    if (!navigator.onLine) { drv.state = 'offline'; refreshDriveUI(); toast('אין אינטרנט. הגיבוי שמור בטאבלט ויעלה כשיהיה אינטרנט.'); return; }
+    if (await driveFlush()) toast('הגיבוי נבדק ונשמר ב-Google Drive ✓');
+    else if (drv.state === 'retry' || drv.state === 'auth') {
+      if (await dialog({ title: (drv.state === 'auth' ? 'לא הצלחתי להתחבר לחשבון Google.' : 'לא הצלחתי להעלות ל-Google Drive.') + '\nהגיבוי שמור בטאבלט ולא נמחק.', ok: 'נסה שוב' })) driveTapNote();
+    }
+  }
+  async function driveDisconnect() {
+    if (!await dialog({ title: 'לנתק את Google Drive?\nהגיבויים שכבר ב-Drive נשארים שם. המחברות בטאבלט לא נפגעות.', ok: 'ניתוק' })) return;
+    const tok = drv.token;
+    dropToken();
+    if (tok && window.google && google.accounts) try { google.accounts.oauth2.revoke(tok, () => {}); } catch (e) { /* ignore */ }
+    Object.assign(settings.drive, { on: false, email: '', folderId: '', sig: '' });
+    saveSettings();
+    persist(() => DB.delFiles([OUTBOX]));
+    drv.state = '';
+    refreshDriveUI();
+  }
+  async function driveRestore() {
+    if (!navigator.onLine) { info('צריך אינטרנט כדי לשחזר מ-Google Drive.'); return; }
+    let files;
+    try {
+      await getToken('restore');
+      const folder = await driveFolder();
+      files = (await gjson(GAPI + 'files?' + qs({ q: qstr(folder) + ' in parents and trashed=false', orderBy: 'createdTime desc', fields: 'files(id,name,size,createdTime)', pageSize: '50' }))).files || [];
+    } catch (err) {
+      console.error(err);
+      if (await dialog({ title: driveError(err), ok: 'נסה שוב' })) driveRestore();
+      return;
+    }
+    files = files.filter((f) => f.name.startsWith('machberet-'));
+    if (!files.length) { info('אין עדיין גיבויים בתיקייה "' + DRIVE_FOLDER + '" ב-Drive.'); return; }
+    const mb = (n) => (n < 1e6 ? Math.max(1, Math.round(n / 1e3)) + ' KB' : (n / 1e6).toFixed(1) + ' MB');
+    const id = await dialog({ title: 'מאיזה גיבוי לשחזר?', list: files.map((f) => ({ label: stampText(Date.parse(f.createdTime)) + ' · ' + mb(+f.size || 0), value: f.id })) });
+    if (!id) return;
+    toast('מוריד מ-Drive…');
+    let text;
+    try { text = await (await gfetch(GAPI + 'files/' + id + '?alt=media')).text(); } catch (err) {
+      console.error(err);
+      if (await dialog({ title: driveError(err) + '\nלא שיניתי כלום.', ok: 'נסה שוב' })) driveRestore();
+      return;
+    }
+    restoreFromText(text, 'בחירת גיבוי אחר', driveRestore);
   }
 
   // ----- דף שגדל -----
@@ -4002,7 +4370,9 @@
     if (!out) throw new Error('encode');
     return { blob: out, w, h };
   }
+  let imgAt = null; // מקום שנבחר בלחיצה ארוכה; התמונה תמוקם שם
   async function insertImage(blob, retry) {
+    const at = imgAt;
     if (!curPage || loading) return;
     if (viewOnly) setViewOnly(false);
     let r;
@@ -4019,8 +4389,9 @@
     let w = r.w / dpr / view.s, h = r.h / dpr / view.s;
     const k = Math.min(1, vw * 0.8 / w, vh * 0.8 / h, PAGE_W * 0.9 / w);
     w *= k; h *= k;
-    const x = Math.max(0, Math.min(PAGE_W - w, (vx0 + vx1) / 2 - w / 2));
-    const y = Math.max(0, Math.min(PAGE_H - h, (vy0 + vy1) / 2 - h / 2));
+    imgAt = null;
+    const x = Math.max(0, Math.min(PAGE_W - w, (at ? at.x : (vx0 + vx1) / 2) - w / 2));
+    const y = Math.max(0, Math.min(PAGE_H - h, (at ? at.y : (vy0 + vy1) / 2) - h / 2));
     const im = makeImg({ id: newId(), page: curPage, blob: r.blob, mime: r.blob.type, cx: x + w / 2, cy: y + h / 2, iw: w, ih: h, ang: 0 });
     commit({ add: [im], remove: [] });
     sel = makeSel([im]);
@@ -4052,7 +4423,7 @@
   document.addEventListener('paste', (e) => {
     if (!library.hidden || !dlg.hidden || !e.clipboardData) return;
     const f = [...e.clipboardData.files].find((x) => x.type.startsWith('image/'));
-    if (f) { e.preventDefault(); insertImage(f); }
+    if (f) { e.preventDefault(); imgAt = null; insertImage(f); }
   });
 
   // ===================== ייצוא PDF =====================
@@ -4285,9 +4656,9 @@
     else if (cmd === 'view') setViewOnly(!viewOnly);
     else if (cmd === 'hidebar') setBarHidden(true);
     else if (cmd === 'backup') exportBackup({ nb: curNb && curNb.id });
-    else if (cmd === 'imgGal') galFile.click();
-    else if (cmd === 'imgCam') camFile.click();
-    else if (cmd === 'imgPaste') pasteImage();
+    else if (cmd === 'imgGal') { imgAt = null; galFile.click(); }
+    else if (cmd === 'imgCam') { imgAt = null; camFile.click(); }
+    else if (cmd === 'imgPaste') { imgAt = null; pasteImage(); }
     else if (cmd === 'pdfAdd') pickPdf('append');
     else if (cmd === 'pdfInk') inkConvertNb();
     else if (cmd === 'pdfExport') exportPdfMenu();
@@ -4329,7 +4700,15 @@
       if (nb && nbAlive(nb)) await openPage(nb.id, settings.page); else await openLatest();
     } catch (err) { console.error(err); setStatus('⚠ אין גישה לאחסון'); }
   }
-  boot();
+  const driveAfter = DRIVE_CLIENT_ID ? readRedirectToken() : '';
+  boot().then(() => {
+    // חזרה מדף ההתחברות של Google: ממשיכים את מה שהתחיל
+    if (driveAfter === 'connect') finishConnect();
+    else if (driveAfter === 'now') driveNow(true);
+    else if (driveAfter === 'restore') driveRestore();
+    else if (driveAfter === 'failed') info('ההתחברות ל-Google לא הושלמה. אפשר לנסות שוב מההגדרות בספרייה.');
+    else setTimeout(driveFlush, 5000); // גיבוי שחיכה בטאבלט (למשל בלי אינטרנט)
+  });
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
