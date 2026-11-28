@@ -3336,14 +3336,16 @@
     } else if (!d.on) {
       card([
         row('גיבוי אוטומטי ל-Google Drive', 'הגיבויים נשמרים בתיקייה "' + DRIVE_FOLDER + '". האפליקציה רואה רק את הקבצים שלה.', pill('חיבור', driveConnect)),
+        row('חיבור קבוע (בלי להתחבר שוב)', 'הדבקת קוד החיבור מהסקריפט שלי ב-Google', pill('הדבקת קוד', drivePasteLink)),
         row('שחזור מגיבוי ב-Drive', 'מוסיף מהגיבוי, לא מוחק את מה שכבר כאן', pill('בחירה', driveRestore)),
       ]);
     } else {
-      const st = row('מחובר' + (d.email ? ': ' + d.email : ''), driveStatusText(), pill('גיבוי עכשיו', () => driveNow()));
+      const st = row('מחובר' + (d.email ? ': ' + d.email : '') + (scriptCfg() ? ' · חיבור קבוע' : ''), driveStatusText(), pill('גיבוי עכשיו', () => driveNow()));
       if (drv.state === 'auth' || drv.state === 'retry') { st.querySelector('.sub').style.color = '#c62828'; st.firstChild.onclick = driveTapNote; }
       card([
         st,
         row('שחזור מגיבוי ב-Drive', 'מוסיף מהגיבוי, לא מוחק את מה שכבר כאן', pill('בחירה', driveRestore)),
+        ...(scriptCfg() ? [] : [row('חיבור קבוע (בלי להתחבר שוב)', 'הדבקת קוד החיבור מהסקריפט שלי ב-Google', pill('הדבקת קוד', drivePasteLink))]),
         row('ניתוק מ-Google Drive', 'הגיבוי האוטומטי ייפסק', pill('ניתוק', driveDisconnect)),
       ]);
       const n2 = document.createElement('div');
@@ -3858,17 +3860,80 @@
     return after ? 'failed' : '';
   }
   // after: ריק = בלי חלון התחברות (רק טוקן שכבר יש); אחרת חלון, ואם צריך מעבר לדף ההתחברות
+  // ----- חיבור קבוע: Google Apps Script בחשבון שלי מחזיר טוקן טרי (בלי חלון התחברות, בלי תפוגה) -----
+  // הכתובת והקוד הסודי נשמרים רק בהגדרות בטאבלט (לא בקוד: המאגר ציבורי)
+  const scriptCfg = () => { const s = settings.drive && settings.drive.script; return s && s.url && s.key ? s : null; };
+  async function scriptToken() {
+    const s = scriptCfg();
+    let r;
+    try {
+      r = await fetch(s.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ key: s.key }), cache: 'no-store', redirect: 'follow' });
+    } catch (e) { throw new Error('script net'); }
+    if (!r.ok) throw new Error('script ' + r.status);
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* דף HTML = הסקריפט לא מאושר */ }
+    if (!j || !j.token) throw needAuth();
+    setToken(j.token, 1800); // הטוקן של הסקריפט תקף עד שעה; מבקשים חדש אחרי חצי שעה
+  }
+  // קוד חיבור = base64 של {u: כתובת הסקריפט, k: קוד סודי}. מתקבל כקישור (#drivelink=...) או בהדבקה
+  function parseDriveLink(text) {
+    try {
+      let c = String(text || '').trim();
+      const m = c.match(/drivelink=([A-Za-z0-9_\-+/=]+)/);
+      if (m) c = m[1];
+      const o = JSON.parse(atob(c.replace(/-/g, '+').replace(/_/g, '/')));
+      if (/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(o.u) && /^\w{16,}$/.test(o.k)) return { url: o.u, key: o.k };
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+  function readDriveLink() {
+    if (!/drivelink=/.test(location.hash)) return null;
+    const cfg = parseDriveLink(location.hash);
+    history.replaceState(null, '', appUrl());
+    return cfg || 'bad';
+  }
+  async function applyDriveLink(cfg) {
+    if (cfg === 'bad') { info('קוד החיבור ל-Drive לא תקין. כדאי להעתיק אותו שוב, בשלמותו.'); return; }
+    if (!navigator.onLine) { info('צריך אינטרנט כדי לחבר את Google Drive. אפשר לפתוח את הקישור שוב כשיהיה אינטרנט.'); return; }
+    // התיקייה הישנה (מהחיבור לשעה) לא נראית לחיבור הקבוע. אם עוד יש טוקן ישן בתוקף, משנים לה את השם כדי שלא יהיו שתיים באותו שם
+    if (tokenOk() && settings.drive.folderId) {
+      try { await gfetch(GAPI + 'files/' + settings.drive.folderId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: DRIVE_FOLDER + ' (ישן)' }) }); } catch (e) { console.error(e); }
+    }
+    dropToken();
+    const prev = settings.drive.script;
+    settings.drive.script = cfg;
+    try { await scriptToken(); } catch (err) {
+      console.error(err);
+      settings.drive.script = prev;
+      const again = await dialog({ title: (err.auth ? 'החיבור הקבוע לא עובד (הסקריפט לא מאושר או שהקוד שגוי).' : 'לא הצלחתי לדבר עם Google.') + '\nשום דבר לא השתנה.', ok: 'נסה שוב' });
+      if (again) applyDriveLink(cfg);
+      return;
+    }
+    saveSettings();
+    finishConnect();
+  }
+  async function drivePasteLink() {
+    const r = await dialog({ title: 'הדבקת קוד החיבור הקבוע ל-Drive', input: '', ok: 'חיבור' });
+    if (!r || !r.text.trim()) return;
+    applyDriveLink(parseDriveLink(r.text) || 'bad');
+  }
+
   async function getToken(after) {
     if (tokenOk()) return drv.token;
+    if (scriptCfg()) { await scriptToken(); return drv.token; }
     if (!after) throw needAuth();
     await signIn(after);
     return drv.token;
   }
 
-  async function gfetch(url, opt) {
+  async function gfetch(url, opt, again) {
     opt = opt || {};
     const r = await fetch(url, Object.assign({}, opt, { headers: Object.assign({ Authorization: 'Bearer ' + drv.token }, opt.headers || {}) }));
-    if (r.status === 401) { dropToken(); throw needAuth(); }
+    if (r.status === 401) {
+      dropToken();
+      if (scriptCfg() && !again) { await scriptToken(); return gfetch(url, opt, true); } // טוקן פג: מבקשים חדש ומנסים שוב
+      throw needAuth();
+    }
     if (!r.ok) throw Object.assign(new Error('drive ' + r.status), { status: r.status });
     return r;
   }
@@ -3988,6 +4053,7 @@
   // פתיחת הספרייה (הקשה): אם הטוקן פג ויש מה להעלות, חלון ההתחברות נפתח ונסגר לבד
   function driveOnLibrary() {
     if (!settings.drive.on || !DRIVE_CLIENT_ID || !navigator.onLine) return;
+    if (scriptCfg()) { driveAuto(true); return; } // חיבור קבוע: אין חלון התחברות
     if (!window.google) loadGis().catch(() => {}); // טוען מראש, כדי שחלון ההתחברות ייפתח מיד בהקשה הבאה
     const want = drv.state === 'auth' || drv.state === 'retry' || libSig() !== settings.drive.sig;
     if (want && !tokenOk() && window.google && google.accounts) signIn('').then(() => driveAuto(true), () => { drv.state = 'auth'; refreshDriveUI(); });
@@ -4008,7 +4074,7 @@
     const d = settings.drive;
     if (drv.state === 'up') return 'מעלה גיבוי ל-Drive…';
     if (drv.state === 'offline') return 'אין אינטרנט. הגיבוי שמור בטאבלט ויעלה כשיהיה אינטרנט.';
-    if (drv.state === 'auth') return 'צריך להתחבר שוב ל-Google כדי להעלות. הקשה כאן.';
+    if (drv.state === 'auth') return scriptCfg() ? 'החיבור הקבוע ל-Drive לא ענה. הקשה כאן לנסות שוב.' : 'צריך להתחבר שוב ל-Google כדי להעלות. הקשה כאן.';
     if (drv.state === 'retry') return 'ההעלאה ל-Drive לא הצליחה. אנסה שוב בעוד כמה דקות (או הקשה כאן).';
     return d.lastUp ? 'גובה ל-Drive: ' + stampText(d.lastUp) : 'עוד לא גובה ל-Drive';
   }
@@ -4061,8 +4127,9 @@
     if (!await dialog({ title: 'לנתק את Google Drive?\nהגיבויים שכבר ב-Drive נשארים שם. המחברות בטאבלט לא נפגעות.', ok: 'ניתוק' })) return;
     const tok = drv.token;
     dropToken();
-    if (tok && window.google && google.accounts) try { google.accounts.oauth2.revoke(tok, () => {}); } catch (e) { /* ignore */ }
-    Object.assign(settings.drive, { on: false, email: '', folderId: '', sig: '' });
+    // בחיבור קבוע לא מבטלים את הטוקן (זה היה מבטל גם את האישור של הסקריפט)
+    if (tok && !scriptCfg() && window.google && google.accounts) try { google.accounts.oauth2.revoke(tok, () => {}); } catch (e) { /* ignore */ }
+    Object.assign(settings.drive, { on: false, email: '', folderId: '', sig: '', script: null });
     saveSettings();
     persist(() => DB.delFiles([OUTBOX]));
     drv.state = '';
@@ -4701,7 +4768,9 @@
     } catch (err) { console.error(err); setStatus('⚠ אין גישה לאחסון'); }
   }
   const driveAfter = DRIVE_CLIENT_ID ? readRedirectToken() : '';
+  const driveLink = DRIVE_CLIENT_ID ? readDriveLink() : null;
   boot().then(() => {
+    if (driveLink) { applyDriveLink(driveLink); return; } // נפתח קישור החיבור הקבוע
     // חזרה מדף ההתחברות של Google: ממשיכים את מה שהתחיל
     if (driveAfter === 'connect') finishConnect();
     else if (driveAfter === 'now') driveNow(true);
