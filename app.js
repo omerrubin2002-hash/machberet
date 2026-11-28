@@ -1744,9 +1744,10 @@
   // items: [[תווית, פעולה], ...]
   function showCtx(cx, cy, items) {
     ctxMenu.textContent = '';
-    for (const [label, fn] of items) {
+    for (const [label, fn, color] of items) {
       const b = document.createElement('button');
       b.textContent = label;
+      if (color) { b.className = 'ctx-color'; b.style.background = color; b.setAttribute('aria-label', 'צבע'); }
       b.addEventListener('click', () => { ctxMenu.hidden = true; fn(); });
       ctxMenu.appendChild(b);
     }
@@ -1775,7 +1776,7 @@
       if (!selDrag || selDrag.pointerId !== L.id || selDrag.lifted) return;
       selDrag = null;
       t.ignored = true; // הרמת האצבע לא תעשה כלום
-      showCtx(L.cx, L.cy, selMenuItems());
+      showCtx(L.cx, L.cy, selMenuItems(L.cx, L.cy));
     } else {
       if (busy() || viewOnly || loading || (gesture && (gesture.moved || gesture.pinched))) return;
       const x = wx(L.cx), y = wy(L.cy), im = imageAt(x, y);
@@ -1790,8 +1791,25 @@
       } else showCtx(L.cx, L.cy, [['הדבקה', () => pasteAt(x, y)]]);
     }
   }
-  function selMenuItems() {
+  // שינוי סוג העט / הצבע של הכתב שנבחר (תמונות לא משתנות; מדגש נשאר מדגש בשינוי סוג)
+  function restyleSelection(patch) {
+    if (!sel || busy()) return;
+    const ink = sel.items.filter((st) => !st.img), imgs = sel.items.filter((st) => st.img);
+    const changed = ink.map((st) => makeStroke({ id: newId(), page: curPage, type: patch.type && st.type !== 'hl' ? patch.type : st.type, color: patch.color || st.color, size: st.size, pts: st.pts.slice() }));
+    const action = { add: sel.keep.concat(changed), remove: sel.whole.filter((st) => !st.img).concat(sel.remove) };
+    sel = makeSel(changed.concat(imgs), sel.poly);
+    commit(action);
+    render();
+    updateUI();
+  }
+  function selStyleMenu(cx, cy, what) {
+    if (what === 'type') showCtx(cx, cy, [['כדורי', 'felt'], ['נובע', 'fountain'], ['מכחול', 'brush'], ['עיפרון', 'pencil']]
+      .map(([label, t]) => [label, () => restyleSelection({ type: t })]));
+    else showCtx(cx, cy, settings.penColors.map((c) => ['', () => restyleSelection({ color: c }), c]));
+  }
+  function selMenuItems(cx, cy) {
     const items = [['העתקה', copyToClipboard], ['שכפול', copySelection]];
+    if (sel && sel.items.some((st) => !st.img)) items.push(['סוג עט', () => selStyleMenu(cx, cy, 'type')], ['צבע', () => selStyleMenu(cx, cy, 'color')]);
     if (sel && sel.img) items.push(['סיבוב', rotateSelImg], ['חיתוך', () => { if (sel && !sel.crop) toggleCrop(); }]);
     items.push(['מחיקה', deleteSelection]);
     return items;
@@ -3907,20 +3925,13 @@
     const recs = [];
     for (const it of scan.list) {
       const C = inkCenterline(it.P), n = C.length, pts = new Float32Array(n * 3);
-      let rmax = 0, rsum = 0;
-      for (const c of C) { rmax = Math.max(rmax, c[2]); rsum += c[2]; }
-      if (it.hl) {
-        const size = Math.max(1, 2 * rsum / n);
-        C.forEach((c, i) => { pts[i * 3] = c[0]; pts[i * 3 + 1] = c[1]; pts[i * 3 + 2] = 0.5; });
-        recs.push({ id: newId(), page: pageId, type: 'hl', color: it.color, size, pts });
-        continue;
-      }
-      const size = Math.max(0.3, rmax * 2 / 1.3); // עט נובע: רדיוס = גודל × (0.35 + 0.95 × לחץ) / 2
-      C.forEach((c, i) => {
-        pts[i * 3] = c[0]; pts[i * 3 + 1] = c[1];
-        pts[i * 3 + 2] = Math.min(1, Math.max(0, (2 * c[2] / size - 0.35) / 0.95));
-      });
-      recs.push({ id: newId(), page: pageId, type: 'fountain', color: it.color, size, pts });
+      // עובי ממוצע בלי הקצוות (שם שני הצדדים נפגשים והעובי 0). כדורי: רדיוס = גודל × 0.45; מדגש: גודל × 0.5
+      let rsum = 0, rn = 0;
+      for (let i = 0; i < n; i++) if (n < 5 || (i > 0 && i < n - 1)) { rsum += C[i][2]; rn++; }
+      const r = rn ? rsum / rn : 0.5;
+      C.forEach((c, i) => { pts[i * 3] = c[0]; pts[i * 3 + 1] = c[1]; pts[i * 3 + 2] = 0.5; });
+      if (it.hl) recs.push({ id: newId(), page: pageId, type: 'hl', color: it.color, size: Math.max(1, 2 * r), pts });
+      else recs.push({ id: newId(), page: pageId, type: 'felt', color: it.color, size: Math.max(0.3, r / 0.45), pts });
     }
     return recs;
   }
