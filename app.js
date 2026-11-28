@@ -3868,9 +3868,16 @@
       if (c < bc) { bc = c; best = k; }
     }
     const [A, B] = sides(best);
-    const M = Math.max(2, Math.min(400, Math.ceil(inkResample(A, 2).T / 1.5) + 1));
+    // נקודה כל חצי יחידה: כתב קטן שומר על הפרטים
+    const M = Math.max(2, Math.min(800, Math.ceil(inkResample(A, 2).T / 0.5) + 1));
     const ra = inkResample(A, M).out, rb = inkResample(B, M).out;
-    return ra.map((a, i) => [(a[0] + rb[i][0]) / 2, (a[1] + rb[i][1]) / 2, Math.hypot(a[0] - rb[i][0], a[1] - rb[i][1]) / 2]);
+    const C = ra.map((a, i) => [(a[0] + rb[i][0]) / 2, (a[1] + rb[i][1]) / 2, Math.hypot(a[0] - rb[i][0], a[1] - rb[i][1]) / 2]);
+    // עובי ממוצע אמיתי = שטח הצורה / אורך קו האמצע (מדויק יותר ממרחק בין הצדדים)
+    let area = 0, len = 0;
+    for (let i = 0; i < N; i++) { const a = P[i], b = P[(i + 1) % N]; area += a[0] * b[1] - b[0] * a[1]; }
+    for (let i = 1; i < C.length; i++) len += Math.hypot(C[i][0] - C[i - 1][0], C[i][1] - C[i - 1][1]);
+    C.w = len > 0.5 ? Math.abs(area) / 2 / len : 0;
+    return C;
   }
   function inkHex(c) {
     if (typeof c === 'string') return c.startsWith('#') ? c.slice(0, 7) : '#000000';
@@ -3928,7 +3935,7 @@
       // עובי ממוצע בלי הקצוות (שם שני הצדדים נפגשים והעובי 0). כדורי: רדיוס = גודל × 0.45; מדגש: גודל × 0.5
       let rsum = 0, rn = 0;
       for (let i = 0; i < n; i++) if (n < 5 || (i > 0 && i < n - 1)) { rsum += C[i][2]; rn++; }
-      const r = rn ? rsum / rn : 0.5;
+      const r = C.w ? C.w / 2 : rn ? rsum / rn : 0.5;
       C.forEach((c, i) => { pts[i * 3] = c[0]; pts[i * 3 + 1] = c[1]; pts[i * 3 + 2] = 0.5; });
       if (it.hl) recs.push({ id: newId(), page: pageId, type: 'hl', color: it.color, size: Math.max(1, 2 * r), pts });
       else recs.push({ id: newId(), page: pageId, type: 'felt', color: it.color, size: Math.max(0.3, r / 0.45), pts });
