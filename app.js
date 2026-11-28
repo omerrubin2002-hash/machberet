@@ -3787,7 +3787,7 @@
   // הגיבוי נבנה ונבדק על המכשיר, נשמר ב"תיבת יציאה" (IndexedDB), ורק אז עולה ל-Drive.
   // בלי אינטרנט הוא מחכה בתיבה ועולה כשהאינטרנט חוזר. אחרי העלאה בודקים שהקובץ ב-Drive זהה (גודל + SHA-256).
   // הרשאה: drive.file = האפליקציה רואה רק קבצים שהיא עצמה יצרה.
-  const DRIVE_CLIENT_ID = '62157297948-9teoedfg4eksb4s1it83fqjiu56921ok.apps.googleusercontent.com';
+  const DRIVE_CLIENT_ID = '274859711595-avqlksnejku2ffbbtbsiqjds2q97r16v.apps.googleusercontent.com';
   const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
   const DRIVE_FOLDER = 'המחברת שלי - גיבויים';
   const DRIVE_KEEP = 15;               // כמה גיבויים לשמור ב-Drive (הישנים יותר עוברים לאשפה של Drive)
